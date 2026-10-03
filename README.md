@@ -7,10 +7,14 @@ A local, private take on Wispr Flow for Apple Silicon Macs. Your audio and text 
 ## What it does
 
 - **Push to talk.** Hold the right Option key, speak, release.
+- **Hands-free.** Double-tap right Option to keep listening, and tap once more to stop.
+- **Or click to talk.** A small, mostly see-through pill stays on screen; click it to start, click again to stop.
+- **Rewrite in a style.** Turn any dictation into a grammar-corrected, polite, or sugarcoated version, or a style you define yourself.
+- **A window to manage it.** Right-click the pill for your dictation history and stats, the dictionary, and settings.
 - **Cleans up speech.** Removes filler words, fixes punctuation, and drops what you took back: "Can you please write down, sorry, please stop" becomes "Please stop."
 - **Keeps your voice.** Complete sentences are never deleted, and casual words (gonna, kinda) stay as spoken.
 - **Personal dictionary.** Names and jargon you list are spelled your way.
-- **On-screen indicator.** A small pill shows "Listening" and "Writing…" so you know it heard you.
+- **On-screen indicator.** The pill turns solid and shows "Listening" and "Writing…" so you know it heard you.
 - **Never loses a dictation.** If the cleanup model is unavailable, the raw transcript is pasted instead.
 
 ## Requirements
@@ -38,13 +42,25 @@ macOS will ask the app you launch it from (Terminal, iTerm, ...) for three permi
 
 ## Usage
 
-Click into any text field, hold **right Option (⌥)**, say a sentence, and release. Presses shorter than 0.3 seconds are ignored as accidental taps.
+Click into any text field, then either:
+
+- hold **right Option (⌥)**, say a sentence, and release,
+- double-tap **right Option** to record hands-free, then tap it once more to stop, or
+- click the pill at the bottom of the screen, speak for as long as you like, and click it again.
+
+Clicking the pill never takes focus from the app you are typing in. Recordings shorter than 0.3 seconds are ignored as accidental taps.
 
 The terminal logs every dictation with the raw transcription beside the cleaned text, so you can see which step made a mistake.
 
+## Rewrite styles
+
+In the window, each dictation has a Rewrite button. Pick a style and the result appears in a card with Copy and Regenerate; nothing is generated until you pick one. Three styles are built in (Grammar, Polite, Sugarcoated). Add, edit, and delete your own in the Styles tab: a name of up to 30 characters and an instruction of up to 300. Custom styles are saved in `styles.json`.
+
+Every style uses the same prompt, which tells the model to keep your facts, names, and numbers, and to treat the dictation as text to rewrite, never as instructions.
+
 ## Dictionary
 
-Create `dictionary.txt` next to `dictate.py`, one term per line:
+Add terms in the Dictionary tab of the window, or edit `dictionary.txt` next to `dictate.py`, one term per line:
 
 ```
 Reykjavík
@@ -58,8 +74,12 @@ The terms are given to Whisper as spelling hints and to the cleanup model as cor
 
 | Setting | How | Default |
 |---|---|---|
-| Cleanup model | `DICTATE_MODEL` environment variable | `gemma4:e4b` |
-| Hotkey | `HOTKEY` at the top of `dictate.py` | right Option |
+| Cleanup model | Settings tab, or `DICTATE_MODEL` environment variable | `gemma4:e4b` |
+| Shortcut | Settings tab: click Change, then press any single modifier key, a function key, or a combination such as ⌘E | right Option |
+| Microphone | Settings tab | system default |
+| Dictation language | Settings tab | auto-detect |
+| Idle pill visibility | Settings tab | 30% |
+| Save history | Settings tab | on |
 | Whisper model | `WHISPER` at the top of `dictate.py` | `whisper-large-v3-turbo` |
 
 On a 16 GB M5 MacBook Air, measured on the cleanup step alone:
@@ -72,12 +92,16 @@ On a 16 GB M5 MacBook Air, measured on the cleanup step alone:
 
 ## How it works
 
-1. `pynput` watches for the hotkey and `sounddevice` records while it is held.
+1. A native macOS key monitor watches for the hotkey and `sounddevice` records while it is held.
 2. `mlx-whisper` transcribes the audio on the GPU.
 3. Ollama rewrites the transcript using the prompt in `dictate.py`.
 4. The result goes to the clipboard and is pasted with Cmd+V.
 
-Everything is in one file, `dictate.py`.
+The pill is a small AppKit panel drawn with PyObjC. The window is `ui.html` shown in a WebKit view; it talks to the dictation process over a localhost-only server that rejects requests from any other website.
+
+Your history, dictionary and settings are plain files beside the script (`history.jsonl`, `dictionary.txt`, `settings.json`, `styles.json`) and are git-ignored.
+
+The logic is in `dictate.py`; the window's layout is in `ui.html`.
 
 ## Testing the cleanup prompt
 
@@ -89,6 +113,8 @@ This runs a list of raw transcripts through the cleanup model and checks each re
 
 ## Known limits
 
+- Auto-detect can mistake a short non-English dictation for English; pick the language in Settings if you mostly dictate in one.
+- A microphone plugged in after launch appears in Settings only after a restart.
 - Dictating overwrites your clipboard.
 - The first dictation after about 30 idle minutes is slower while the model reloads.
 - Text appears when you release the key, not as you speak.

@@ -1,0 +1,467 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>open-flow</title>
+<style>
+  :root {
+    --bg: #e9f3fc; --side: #dbeaf8; --card: #ffffff; --line: #c5daee;
+    --ink: #0a0f1a; --muted: #4b5b70; --accent: #0b5fcc; --accent-soft: #cfe3f9; --danger: #a4161a;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; display: grid; grid-template-columns: 220px 1fr; min-height: 100vh;
+    background: var(--bg); color: var(--ink);
+    font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
+  }
+  button, input, select { font: inherit; color: inherit; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  nav { background: var(--side); border-right: 1px solid var(--line); padding: 28px 14px; }
+  .brand { font-size: 20px; font-weight: 700; letter-spacing: -0.02em; padding: 0 10px 22px; }
+  .brand span { color: var(--accent); }
+  nav button {
+    display: block; width: 100%; text-align: left; border: 0; background: none;
+    padding: 9px 12px; border-radius: 9px; cursor: pointer; font-weight: 500;
+  }
+  nav button:hover { background: var(--accent-soft); }
+  nav button[aria-current="page"] { background: var(--ink); color: #fff; }
+
+  main { padding: 36px 44px 60px; max-width: 900px; width: 100%; }
+  h1 { font-size: 26px; letter-spacing: -0.02em; margin: 0 0 4px; }
+  .lead { color: var(--muted); margin: 0 0 26px; }
+  section[hidden] { display: none; }
+
+  .tiles { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; margin-bottom: 30px; }
+  .tile { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 16px 18px; }
+  .tile b { display: block; font-size: 30px; line-height: 1.15; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
+  .tile span { color: var(--muted); font-size: 13px; }
+
+  .day { font-size: 12px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); margin: 22px 0 8px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; overflow: hidden; }
+  .row { display: grid; grid-template-columns: 76px 1fr auto; gap: 12px; align-items: start; padding: 13px 16px; }
+  .row + .row { border-top: 1px solid var(--line); }
+  .row time { color: var(--muted); font-size: 13px; padding-top: 2px; font-variant-numeric: tabular-nums; }
+  .row p { margin: 0; overflow-wrap: anywhere; }
+  .empty { padding: 26px 18px; color: var(--muted); }
+  .actions { display: flex; gap: 6px; align-items: center; }
+  .muted { color: var(--muted); }
+
+  .rewrite { grid-column: 2 / -1; display: grid; gap: 10px; }
+  .chips { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  .chip { border: 1px solid var(--line); background: var(--bg); border-radius: 999px; padding: 4px 13px; cursor: pointer; font-size: 13px; font-weight: 500; }
+  .chip:hover:not(:disabled) { border-color: var(--ink); }
+  .chip[aria-pressed="true"] { background: var(--ink); color: #fff; border-color: var(--ink); }
+  .chip:disabled { opacity: 0.45; cursor: default; }
+  .chip.add { border-style: dashed; background: none; color: var(--accent); }
+  .result { background: var(--bg); border: 1px solid var(--line); border-radius: 10px; padding: 11px 14px; }
+  .result h3 { margin: 0 0 4px; font-size: 12px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }
+  .result p { margin: 0 0 9px; overflow-wrap: anywhere; }
+  .result .error { color: var(--danger); }
+
+  .style-form { display: grid; gap: 10px; padding: 16px; margin-bottom: 18px; }
+  .style-form label { display: grid; gap: 4px; font-size: 13px; font-weight: 600; }
+  .style-form input { font-weight: 400; font-size: 15px; }
+  .style { display: grid; grid-template-columns: 1fr auto; gap: 16px; padding: 13px 16px; align-items: start; }
+  .style + .style { border-top: 1px solid var(--line); }
+  .style small { display: block; color: var(--muted); }
+  .tag { font-size: 12px; color: var(--muted); border: 1px solid var(--line); border-radius: 999px; padding: 2px 10px; }
+
+  .btn { border: 1px solid var(--line); background: var(--card); border-radius: 8px; padding: 5px 12px; cursor: pointer; font-size: 13px; font-weight: 500; }
+  .btn:hover { border-color: var(--ink); }
+  .btn.primary { background: var(--ink); color: #fff; border-color: var(--ink); padding: 8px 16px; font-size: 15px; }
+  .btn.danger { color: var(--danger); }
+  .toolbar { display: flex; justify-content: flex-end; margin-top: 18px; }
+
+  .add { display: flex; gap: 10px; margin-bottom: 18px; }
+  input[type="text"] { flex: 1; border: 1px solid var(--line); border-radius: 9px; padding: 8px 12px; background: var(--card); }
+  .term { display: flex; justify-content: space-between; align-items: center; padding: 10px 16px; }
+  .term + .term { border-top: 1px solid var(--line); }
+
+  .field { display: grid; grid-template-columns: 1fr auto; gap: 6px 24px; align-items: center; padding: 16px 18px; }
+  .field + .field { border-top: 1px solid var(--line); }
+  .field small { grid-column: 1; color: var(--muted); }
+  .field .control { grid-row: 1 / span 2; grid-column: 2; }
+  select { border: 1px solid var(--line); border-radius: 9px; padding: 7px 10px; background: var(--card); max-width: 260px; }
+  input[type="range"] { width: 180px; accent-color: var(--accent); }
+  input[type="checkbox"] { width: 18px; height: 18px; accent-color: var(--accent); }
+  kbd { background: var(--accent-soft); border-radius: 6px; padding: 1px 7px; font: inherit; font-weight: 600; }
+  .keys { margin: 0; padding: 14px 18px 14px 38px; }
+  .keys li { padding: 3px 0; }
+
+  @media (max-width: 720px) {
+    body { grid-template-columns: 1fr; }
+    nav { display: flex; gap: 6px; padding: 12px 16px; border-right: 0; border-bottom: 1px solid var(--line); }
+    .brand { display: none; }
+    nav button { width: auto; }
+    main { padding: 24px 16px 48px; }
+    .tiles { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+<nav aria-label="Sections">
+  <div class="brand">open<span>-flow</span></div>
+  <button data-view="dictation" aria-current="page">Dictation</button>
+  <button data-view="dictionary">Dictionary</button>
+  <button data-view="styles">Styles</button>
+  <button data-view="settings">Settings</button>
+</nav>
+<main>
+  <section id="dictation">
+    <h1>Your dictations</h1>
+    <p class="lead">Everything here stays on this Mac.</p>
+    <div class="tiles">
+      <div class="tile"><b id="words">0</b><span>total words</span></div>
+      <div class="tile"><b id="wpm">0</b><span>words per minute</span></div>
+      <div class="tile"><b id="streak">0</b><span>day streak</span></div>
+    </div>
+    <div id="history"></div>
+    <div class="toolbar"><button class="btn danger" id="clear">Clear history</button></div>
+  </section>
+
+  <section id="dictionary" hidden>
+    <h1>Dictionary</h1>
+    <p class="lead">Names and jargon you add here are spelled your way.</p>
+    <form class="add" id="add-term">
+      <input type="text" id="new-term" maxlength="80" placeholder="Add a name or term" aria-label="New dictionary term" autocomplete="off">
+      <button class="btn primary" type="submit">Add</button>
+    </form>
+    <div class="card" id="terms"></div>
+  </section>
+
+  <section id="styles" hidden>
+    <h1>Rewrite styles</h1>
+    <p class="lead">Open Rewrite on any dictation to get it in one of these styles. Add your own here.</p>
+    <form class="card style-form" id="style-form">
+      <label>Name <input type="text" id="style-name" maxlength="30" placeholder="For example: Shorter" autocomplete="off"></label>
+      <label>Instruction <input type="text" id="style-instruction" maxlength="300" placeholder="For example: Cut it to half the length without losing any facts." autocomplete="off"></label>
+      <div class="actions">
+        <button class="btn primary" type="submit" id="style-save">Add style</button>
+        <button class="btn" type="button" id="style-cancel" hidden>Cancel</button>
+      </div>
+    </form>
+    <div class="card" id="style-list"></div>
+  </section>
+
+  <section id="settings" hidden>
+    <h1>Settings</h1>
+    <p class="lead">Changes apply to your next dictation.</p>
+    <div class="card">
+      <div class="field">
+        <span>Shortcut <kbd class="hk"></kbd></span>
+        <small id="hotkey-help">The key you hold, or double-tap, to dictate.</small>
+        <span class="control"><button class="btn" id="hotkey-change" type="button">Change</button></span>
+      </div>
+      <label class="field">
+        <span>Microphone</span>
+        <small>Auto-detect follows your Mac's default input.</small>
+        <span class="control"><select id="microphone"></select></span>
+      </label>
+      <label class="field">
+        <span>Dictation language</span>
+        <small>Auto-detect works out the language of each dictation.</small>
+        <span class="control"><select id="language"></select></span>
+      </label>
+    </div>
+    <p class="day">Cleanup and display</p>
+    <div class="card">
+      <label class="field">
+        <span>Cleanup model</span>
+        <small>The local Ollama model that tidies your speech. Smaller is faster.</small>
+        <span class="control"><select id="model"></select></span>
+      </label>
+      <label class="field">
+        <span>Idle pill visibility <span id="alpha-value"></span></span>
+        <small>How visible the on-screen pill is when you are not dictating.</small>
+        <span class="control"><input type="range" id="alpha" min="10" max="100" step="5"></span>
+      </label>
+      <label class="field">
+        <span>Save history</span>
+        <small>Keep a local list of what you dictate. Turning this off stops new entries.</small>
+        <span class="control"><input type="checkbox" id="save-history"></span>
+      </label>
+    </div>
+    <p class="day">Ways to dictate</p>
+    <div class="card">
+      <ul class="keys">
+        <li>Hold <kbd class="hk"></kbd>, speak, release.</li>
+        <li>Double-tap <kbd class="hk"></kbd> to keep listening; tap it once more to stop.</li>
+        <li>Click the pill to start; click it again to stop.</li>
+        <li>Right-click the pill to open this window.</li>
+      </ul>
+    </div>
+  </section>
+</main>
+
+<script>
+const $ = (selector) => document.querySelector(selector);
+const el = (tag, className, text) => {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (text != null) node.textContent = text;  // textContent only: dictated text is never treated as HTML
+  return node;
+};
+let state = null;
+const open = new Set();     // dictations (by timestamp) whose Rewrite panel is open
+const shown = new Map();    // dictation timestamp -> style ids tapped, in order; each one is a result card
+const results = new Map();  // transcript text + style id -> {status, text, error}; a changed transcript misses the cache
+let latestSeen = null, editing = null;
+const last = {};
+const changed = (name, value) => { const json = JSON.stringify(value); if (last[name] === json) return false; last[name] = json; return true; };
+const cacheKey = (text, styleId) => text + "\u0000" + styleId;
+const send = (path, body) => fetch(path, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body || {})});
+
+async function load() {
+  state = await (await fetch("/api/state")).json();
+  render();
+}
+async function post(path, body) {
+  await send(path, body);
+  await load();
+}
+
+function showView(name) {
+  for (const button of document.querySelectorAll("nav button")) {
+    if (button.dataset.view === name) button.setAttribute("aria-current", "page"); else button.removeAttribute("aria-current");
+  }
+  for (const section of document.querySelectorAll("main section")) section.hidden = section.id !== name;
+}
+
+function copyButton(text) {
+  const copy = el("button", "btn", "Copy");
+  copy.onclick = async () => {
+    await send("/api/copy", {text});
+    copy.textContent = "Copied";
+    setTimeout(() => copy.textContent = "Copy", 1200);
+  };
+  return copy;
+}
+
+function confirmClick(button, label, armedLabel, action) {  // two clicks; native confirm() dialogs do not show in this window
+  button.onclick = () => {
+    if (button.dataset.armed) return action();
+    button.dataset.armed = "1";
+    button.textContent = armedLabel;
+    setTimeout(() => { delete button.dataset.armed; button.textContent = label; }, 3000);
+  };
+}
+
+async function runRewrite(entry, style, force) {  // one model call per tap; cached per transcript and style
+  const tapped = shown.get(entry.ts) || [];
+  if (!tapped.includes(style.id)) shown.set(entry.ts, [...tapped, style.id]);
+  const key = cacheKey(entry.text, style.id), cached = results.get(key);
+  if (cached && !force && cached.status !== "error") return renderHistory();
+  results.set(key, {status: "loading"});
+  renderHistory();
+  try {
+    const response = await send("/api/rewrite", {text: entry.text, style: style.id});
+    const data = await response.json();
+    results.set(key, response.ok ? {status: "done", text: data.text} : {status: "error", error: data.error || "That did not work."});
+  } catch (error) {
+    results.set(key, {status: "error", error: "Could not reach the app."});
+  }
+  renderHistory();
+}
+
+function rewritePanel(entry) {
+  const panel = el("div", "rewrite"), chips = el("div", "chips");
+  const tapped = shown.get(entry.ts) || [];
+  for (const style of state.styles) {
+    const chip = el("button", "chip", style.name);
+    chip.disabled = !entry.text.trim();
+    chip.setAttribute("aria-pressed", tapped.includes(style.id));
+    chip.onclick = () => runRewrite(entry, style, false);
+    chips.append(chip);
+  }
+  const add = el("button", "chip add", "+ Add style");
+  add.onclick = () => { showView("styles"); $("#style-name").focus(); };
+  chips.append(add);
+  panel.append(chips);
+  for (const id of tapped) {
+    const style = state.styles.find((s) => s.id === id);
+    if (!style) continue;  // the style was deleted
+    const result = results.get(cacheKey(entry.text, id)) || {status: "loading"};
+    const card = el("div", "result"), actions = el("div", "actions");
+    card.append(el("h3", "", style.name));
+    if (result.status === "loading") {
+      card.append(el("p", "muted", "Rewriting…"));
+    } else if (result.status === "error") {
+      const retry = el("button", "btn", "Retry");
+      retry.onclick = () => runRewrite(entry, style, true);
+      actions.append(retry);
+      card.append(el("p", "error", result.error), actions);
+    } else {
+      const again = el("button", "btn", "Regenerate");
+      again.onclick = () => runRewrite(entry, style, true);
+      actions.append(copyButton(result.text), again);
+      card.append(el("p", "", result.text), actions);
+    }
+    panel.append(card);
+  }
+  return panel;
+}
+
+function dayLabel(date) {
+  const today = new Date(), yesterday = new Date();
+  yesterday.setDate(today.getDate() - 1);
+  if (date.toDateString() === today.toDateString()) return "Today";
+  if (date.toDateString() === yesterday.toDateString()) return "Yesterday";
+  return date.toLocaleDateString(undefined, {weekday: "long", month: "long", day: "numeric", year: "numeric"});
+}
+
+function renderHistory() {
+  $("#words").textContent = state.stats.words.toLocaleString();
+  $("#wpm").textContent = state.stats.wpm;
+  $("#streak").textContent = state.stats.streak;
+  if (state.history.length && state.history[0].ts !== latestSeen) {  // a new dictation: show its styles straight away
+    latestSeen = state.history[0].ts;
+    open.add(latestSeen);
+  }
+  const box = $("#history");
+  box.replaceChildren();
+  if (!state.history.length) {
+    const card = el("div", "card");
+    card.append(el("div", "empty", "Nothing yet. Hold your shortcut key, double-tap it, or click the pill to dictate."));
+    box.append(card);
+  }
+  let label = null, card = null;
+  for (const entry of state.history) {
+    const date = new Date(entry.ts * 1000);
+    if (dayLabel(date) !== label) {
+      label = dayLabel(date);
+      card = el("div", "card");
+      box.append(el("div", "day", label), card);
+    }
+    const row = el("div", "row"), actions = el("div", "actions");
+    const toggle = el("button", "btn", "Rewrite");
+    toggle.setAttribute("aria-expanded", open.has(entry.ts));
+    toggle.onclick = () => { if (!open.delete(entry.ts)) open.add(entry.ts); renderHistory(); };
+    actions.append(toggle, copyButton(entry.text));
+    row.append(el("time", "", date.toLocaleTimeString(undefined, {hour: "numeric", minute: "2-digit"})), el("p", "", entry.text), actions);
+    if (open.has(entry.ts)) row.append(rewritePanel(entry));
+    card.append(row);
+  }
+  $("#clear").hidden = !state.history.length;
+}
+
+function renderDictionary() {
+  const box = $("#terms");
+  box.replaceChildren();
+  if (!state.dictionary.length) box.append(el("div", "empty", "No terms yet."));
+  for (const term of state.dictionary) {
+    const row = el("div", "term");
+    const remove = el("button", "btn", "Remove");
+    remove.setAttribute("aria-label", "Remove " + term);
+    remove.onclick = () => post("/api/dictionary", {terms: state.dictionary.filter((t) => t !== term)});
+    row.append(el("span", "", term), remove);
+    box.append(row);
+  }
+}
+
+function resetStyleForm() {
+  editing = null;
+  $("#style-form").reset();
+  $("#style-save").textContent = "Add style";
+  $("#style-cancel").hidden = true;
+}
+
+function dropCached(styleId) {  // an edited or deleted style's old results no longer apply
+  for (const key of [...results.keys()]) if (key.endsWith("\u0000" + styleId)) results.delete(key);
+}
+
+function renderStyles() {
+  const box = $("#style-list");
+  box.replaceChildren();
+  for (const style of state.styles) {
+    const row = el("div", "style"), text = el("div"), actions = el("div", "actions");
+    text.append(el("b", "", style.name), el("small", "", style.instruction));
+    if (style.builtin) {
+      actions.append(el("span", "tag", "Built-in"));
+    } else {
+      const edit = el("button", "btn", "Edit"), remove = el("button", "btn danger", "Delete");
+      edit.onclick = () => {
+        editing = style.id;
+        $("#style-name").value = style.name;
+        $("#style-instruction").value = style.instruction;
+        $("#style-save").textContent = "Save changes";
+        $("#style-cancel").hidden = false;
+        $("#style-name").focus();
+      };
+      confirmClick(remove, "Delete", "Click again to delete", () => {
+        dropCached(style.id);
+        if (editing === style.id) resetStyleForm();
+        post("/api/styles/delete", {id: style.id});
+      });
+      actions.append(edit, remove);
+    }
+    row.append(text, actions);
+    box.append(row);
+  }
+}
+
+function fill(select, options, value) {  // options: [[value, label], ...]
+  select.replaceChildren(...options.map(([v, label]) => { const o = el("option", "", label); o.value = v; return o; }));
+  select.value = value;
+}
+
+function renderSettings() {
+  for (const kbd of document.querySelectorAll(".hk")) kbd.textContent = state.settings.hotkey.label;
+  $("#hotkey-change").textContent = state.capturing ? "Press it now…" : "Change";
+  $("#hotkey-change").disabled = state.capturing;
+  $("#hotkey-help").textContent = state.capturing
+    ? "Press one modifier key (such as right ⌥ or Fn), a function key, or a combination like ⌘E. Esc cancels."
+    : state.capture_error || "The key you hold, or double-tap, to dictate.";
+  if (state.capturing) setTimeout(load, 300);  // watch closely until the new shortcut lands
+  if (document.activeElement && document.activeElement.closest("#settings")) return;  // don't fight the user's hand
+  fill($("#microphone"), [["", "Auto-detect"], ...state.microphones.map((name) => [name, name])], state.settings.microphone);
+  fill($("#language"), Object.entries(state.languages), state.settings.language);
+  const select = $("#model");
+  const names = state.models.includes(state.settings.model) ? state.models : [state.settings.model, ...state.models];
+  select.replaceChildren(...names.map((name) => el("option", "", name)));
+  select.value = state.settings.model;
+  $("#alpha").value = Math.round(state.settings.idle_alpha * 100);
+  $("#alpha-value").textContent = "(" + Math.round(state.settings.idle_alpha * 100) + "%)";
+  $("#save-history").checked = state.settings.save_history;
+}
+
+function render() {  // rebuild a list only when its data changed, so open panels and half-typed forms are left alone
+  if (changed("history", [state.history, state.stats, state.styles])) renderHistory();
+  if (changed("dictionary", state.dictionary)) renderDictionary();
+  if (changed("styles", state.styles)) renderStyles();
+  renderSettings();
+}
+
+for (const button of document.querySelectorAll("nav button")) button.onclick = () => showView(button.dataset.view);
+$("#style-form").onsubmit = async (event) => {
+  event.preventDefault();
+  const body = {name: $("#style-name").value.trim(), instruction: $("#style-instruction").value.trim()};
+  if (!body.name || !body.instruction) return;
+  if (editing) { dropCached(editing); await post("/api/styles/update", {id: editing, ...body}); }
+  else await post("/api/styles", body);
+  resetStyleForm();
+};
+$("#style-cancel").onclick = resetStyleForm;
+$("#add-term").onsubmit = (event) => {
+  event.preventDefault();
+  const term = $("#new-term").value.trim();
+  if (term && !state.dictionary.includes(term)) post("/api/dictionary", {terms: [...state.dictionary, term]});
+  $("#new-term").value = "";
+};
+$("#hotkey-change").onclick = () => { $("#hotkey-change").blur(); post("/api/hotkey/capture"); };
+for (const key of ["microphone", "language"]) $("#" + key).onchange = (event) => post("/api/settings", {[key]: event.target.value});
+$("#model").onchange = (event) => post("/api/settings", {model: event.target.value});
+$("#alpha").oninput = (event) => $("#alpha-value").textContent = "(" + event.target.value + "%)";
+$("#alpha").onchange = (event) => post("/api/settings", {idle_alpha: event.target.value / 100});
+$("#save-history").onchange = (event) => post("/api/settings", {save_history: event.target.checked});
+$("#clear").onclick = () => {  // two-step confirm; native confirm() dialogs do not show in this window
+  if ($("#clear").dataset.armed) { delete $("#clear").dataset.armed; $("#clear").textContent = "Clear history"; post("/api/history/clear"); }
+  else { $("#clear").dataset.armed = "1"; $("#clear").textContent = "Click again to delete everything"; setTimeout(() => { delete $("#clear").dataset.armed; $("#clear").textContent = "Clear history"; }, 3000); }
+};
+
+load();
+setInterval(load, 4000);  // pick up new dictations while the window is open
+</script>
+</body>
+</html>

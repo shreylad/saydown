@@ -1,2 +1,5 @@
 __pycache__/
 dictionary.txt
+history.jsonl
+settings.json
+styles.json
