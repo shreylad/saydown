@@ -15,6 +15,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import AppKit
+import objc
 import Foundation
 import numpy as np
 import Quartz
@@ -37,10 +38,9 @@ KEY_NAMES = F_KEYS | {49: "Space", 36: "Return", 48: "Tab", 51: "Delete", 53: "E
 DEFAULT_HOTKEY = {"keycode": 61, "mods": 0, "label": "Right ⌥", "symbol": "⌥"}
 capture = {"until": 0.0, "error": ""}  # set by the settings page while it waits for you to press a new shortcut
 access = {"ok": True, "listen": True, "post": True}  # whether macOS lets this app watch and send keystrokes
-# What the setup card in the window reports. "loading": the speech model is not in memory yet (the first run
-# downloads it). "mic": False once a recording came back as pure silence, which is what a refused microphone gives.
-# "ai": how far setup_ai() has got.
-status = {"loading": True, "mic": True, "ai": {"step": "checking"}}
+# What the setup checklist in the window reports. "loading": the speech model is not in memory yet (the first run
+# downloads it). "mic": True, False (refused) or None (macOS has not asked yet). "ai": how far setup_ai() has got.
+status = {"loading": True, "mic": None, "ai": {"step": "checking"}}
 engine = [None]  # the `ollama serve` process, when this app had to start its own
 # Whisper language codes offered in Settings; "auto" lets Whisper detect the language of each dictation
 LANGUAGES = {
@@ -375,6 +375,31 @@ def models():
         return None
 
 
+# ---- permissions ---------------------------------------------------------------------------------------------
+
+def microphone_allowed():
+    """True, False (refused), or None when macOS has not asked yet."""
+    try:
+        objc.loadBundle("AVFoundation", {}, bundle_path="/System/Library/Frameworks/AVFoundation.framework")
+        state = objc.lookUpClass("AVCaptureDevice").authorizationStatusForMediaType_("soun")  # AVMediaTypeAudio
+        return {0: None, 3: True}.get(state, False)
+    except Exception:
+        return None
+
+
+def keyboard_access():
+    """(may watch keys, may send keys) as macOS sees it right now, for an app that is already running.
+
+    The CGPreflight calls used at launch keep answering what was true at launch, so these ask the lower layers.
+    """
+    services = "/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices"
+    trusted = ctypes.cdll.LoadLibrary(services).AXIsProcessTrusted
+    trusted.restype = ctypes.c_bool
+    check = ctypes.cdll.LoadLibrary("/System/Library/Frameworks/IOKit.framework/IOKit").IOHIDCheckAccess
+    check.restype, check.argtypes = ctypes.c_uint32, [ctypes.c_uint32]
+    return check(1) == 0, bool(trusted())  # 1 is kIOHIDRequestTypeListenEvent; 0 is "granted"
+
+
 # ---- first-run setup of the AI features ----------------------------------------------------------------------
 
 def fetch_engine(note):
@@ -646,7 +671,7 @@ def paste(text):
 
 # ---- settings page server ----------------------------------------------------------------------------------
 
-def make_handler(on_settings_change, on_quit, on_note, taking_note, on_restart):
+def make_handler(on_settings_change, on_quit, on_note, taking_note, on_restart, on_ask_microphone):
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):
             if os.environ.get("DICTATE_DEBUG"):
@@ -697,6 +722,8 @@ def make_handler(on_settings_change, on_quit, on_note, taking_note, on_restart):
                     threading.Timer(0.3, on_quit).start()  # after this reply has gone out
                 elif self.path == "/api/restart":  # after granting permissions, which macOS applies at launch
                     threading.Timer(0.3, on_restart).start()
+                elif self.path == "/api/ask-microphone":  # make macOS show its microphone question again
+                    on_ask_microphone()
                 elif self.path == "/api/open-settings":  # the page of System Settings where a permission is granted
                     subprocess.run(["open", "x-apple.systempreferences:com.apple.preference.security?"
                                     + SETTINGS_PANES[body["pane"]]], check=True)
@@ -960,7 +987,8 @@ def main():
     settings_window = [None]
     try:  # the port doubles as the single-instance lock
         server = ThreadingHTTPServer(("127.0.0.1", PORT), make_handler(lambda: show.refresh(), quit_app, lambda: take_note(),
-                                                                       lambda: recording[0] and note[0], restart))
+                                                                       lambda: recording[0] and note[0], restart,
+                                                                       lambda: ask_for_microphone()))
     except OSError:
         print("Saydown is already running; opening its window")
         open_window()
@@ -1004,21 +1032,24 @@ def main():
         return subprocess.Popen([sys.executable, "-c", RECORDER, path, str(RATE)], stdin=subprocess.PIPE), path
 
     recorder = [spawn()]
-    asked = DATA / "microphone-asked"
-    if not asked.exists():  # first launch: a throwaway recording makes macOS ask for the microphone now, during
-        def ask_for_microphone():  # setup, rather than in the middle of the first sentence
-            probe, path = spawn()
+    status["mic"] = microphone_allowed()
+
+    def ask_for_microphone():  # macOS asks the first time a recording starts, so start a throwaway one
+        def probe():
+            process, path = spawn()
             time.sleep(2)
             try:
-                probe.stdin.write(b"\n")
-                probe.stdin.flush()
+                process.stdin.write(b"\n")
+                process.stdin.flush()
                 time.sleep(1)
             except OSError:
                 pass
-            probe.kill()
+            process.kill()
             Path(path).unlink(missing_ok=True)
-            asked.touch()
-        threading.Thread(target=ask_for_microphone, daemon=True).start()
+        threading.Thread(target=probe, daemon=True).start()
+
+    if status["mic"] is None:  # first launch: ask now, during setup, not in the middle of the first sentence
+        ask_for_microphone()
     lock = threading.Lock()
     recording = [False]
     note = [False]  # the current recording is a note: saved to history, not typed
@@ -1187,7 +1218,6 @@ def main():
         if len(audio) < RATE * TAP:  # accidental tap; Whisper invents text from silence
             print(f"skipped: only {len(audio) / RATE:.1f}s recorded")
             return
-        status["mic"] = bool(audio.any())  # a refused microphone delivers exact zeros; a quiet room never does
         if np.abs(audio).max() < QUIET:  # Whisper writes paragraphs of invented text for near-silence
             print(f"skipped: too quiet to be speech (peak level {np.abs(audio).max():.2f})")
             return
@@ -1255,7 +1285,7 @@ def main():
         def idle():  # what the pill says when nothing is happening
             if not access["ok"]:
                 return "⚠️ Allow access"  # right-click the pill for what to do
-            if not status["mic"]:
+            if status["mic"] is False:
                 return "⚠️ Allow microphone"
             # While a password field has the keyboard, macOS hides key presses from every app, so a shortcut such
             # as ⌘B does nothing. Say so instead of looking broken; clicking the pill still works.
@@ -1276,11 +1306,16 @@ def main():
                 if recording[0] and not hands_free[0] and not key_is_down() and time.time() - pressed_at[0] > 1:
                     print("key release was missed, stopping the recording")
                     stop()
-                if not access["ok"] and time.time() > recheck:  # granted in System Settings meanwhile?
+                if time.time() > recheck:  # what was granted in System Settings since the last look
                     recheck = time.time() + 2
-                    if Quartz.CGPreflightListenEventAccess() and Quartz.CGPreflightPostEventAccess():
-                        print("permissions granted, restarting to use them")
-                        restart()
+                    status["mic"] = microphone_allowed()
+                    if not access["ok"]:
+                        listen, post = keyboard_access()
+                        access.update(listen=listen, post=post)  # the checklist ticks each one as it lands
+                        if listen and post:
+                            print("permissions granted, restarting to use them")
+                            time.sleep(1.5)  # long enough for the window to show the last tick
+                            restart()
                 if not recording[0] and idle() != shown:
                     shown = idle()
                     show(shown)

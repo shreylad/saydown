@@ -51,6 +51,12 @@
   .banner { background: #fbf3d9; border: 1px solid #dcc77a; border-radius: 12px; padding: 12px 16px; margin-bottom: 22px; }
   #setup { background: var(--card); border-color: var(--line); padding: 16px 18px; }
   #setup h2 { font-size: 17px; margin: 0 0 2px; }
+  #setup h2 + p { margin: 0 0 6px; color: var(--muted); }
+  #setup h3 { margin: 14px 0 0; font-size: 12px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+  /* until the three permissions are granted the checklist is the whole window */
+  body.gate nav button, body.gate main section { display: none; }
+  body.gate #setup { padding: 26px 28px; margin-top: 8px; }
+  body.gate #setup h2 { font-size: 26px; letter-spacing: -0.02em; }
   .step { display: grid; grid-template-columns: 22px 1fr auto; gap: 10px; align-items: center; padding: 9px 0; }
   .step + .step { border-top: 1px solid var(--line); }
   .step small { display: block; color: var(--muted); }
@@ -483,35 +489,45 @@ function renderSettings() {
 }
 
 const gigabytes = (bytes) => (bytes / 1e9).toFixed(1) + " GB";
-function renderSetup() {  // the first-run checklist; it disappears once everything on it is done
-  const setup = state.setup, ai = setup.ai, box = $("#setup"), steps = [];
-  const permission = (granted, name, pane, why) => steps.push({done: granted, name, detail: granted ? "Allowed." : why, button: granted ? null : ["Open Settings", () => send("/api/open-settings", {pane})]});
-  permission(setup.access.post, "Accessibility", "accessibility", "Lets Saydown type at your cursor. Switch Saydown on in the list.");
-  permission(setup.access.listen, "Input Monitoring", "input", "Lets Saydown see your shortcut key. Switch Saydown on in the list.");
-  if (!setup.mic) permission(false, "Microphone", "microphone", "Saydown heard only silence. Switch Saydown on in the list.");
-  steps.push({done: !setup.loading, name: "Speech model", detail: setup.loading ? "Loading. The first time, this downloads about 1.6 GB and can take several minutes." : "Ready. You can dictate."});
+function renderSetup() {  // the first-run checklist: permissions first, and the app opens up once all three are granted
+  const setup = state.setup, ai = setup.ai, box = $("#setup"), permissions = [], downloads = [];
+  const open = (pane) => ["Open Settings", () => send("/api/open-settings", {pane})];
+  permissions.push({done: setup.access.post, name: "Accessibility", button: open("accessibility"),
+    detail: setup.access.post ? "Allowed." : "Lets Saydown type at your cursor. Switch Saydown on in the list."});
+  permissions.push({done: setup.access.listen, name: "Input Monitoring", button: open("input"),
+    detail: setup.access.listen ? "Allowed." : "Lets Saydown see your shortcut key. Switch Saydown on in the list."});
+  permissions.push({done: setup.mic === true, name: "Microphone",
+    button: setup.mic === false ? open("microphone") : ["Ask me again", () => send("/api/ask-microphone")],
+    detail: setup.mic === true ? "Allowed." : setup.mic === false ? "Lets Saydown hear you. It was refused earlier: switch Saydown on in the list."
+      : "Lets Saydown hear you. Click Allow when macOS asks."});
+  downloads.push({done: !setup.loading, name: "Speech model", detail: setup.loading ? "Loading. The first time, this downloads about 1.6 GB and can take several minutes." : "Ready."});
   const size = ai.total ? gigabytes(ai.done) + " of " + gigabytes(ai.total) : "";
   const detail = {checking: "Checking…", engine: "Downloading the AI engine. " + size, starting: "Starting the AI engine…",
-    model: "Downloading " + ai.name + ". " + size + ". You can dictate while this finishes.",
+    model: "Downloading " + ai.name + ". " + size + ".",
     ready: "Ready.", failed: "Not set up: " + ai.error + ". Dictation still works; Saydown tries again the next time it opens."}[ai.step];
-  steps.push({done: ai.step === "ready", name: "AI features", detail, progress: ai.total ? ai.done / ai.total : null});
-  box.hidden = steps.every((step) => step.done);
-  if (box.hidden || !changed("setup", steps.map(({button, ...rest}) => rest))) return;
-  box.replaceChildren(el("h2", "", "Setting up Saydown"));
-  for (const step of steps) {
-    const row = el("div", "step" + (step.done ? " done" : "")), text = el("div");
+  downloads.push({done: ai.step === "ready", name: "AI features", detail, progress: ai.total ? ai.done / ai.total : null});
+  const granted = permissions.filter((step) => step.done).length, gate = granted < permissions.length;
+  document.body.classList.toggle("gate", gate);
+  box.hidden = !gate && downloads.every((step) => step.done);
+  if (box.hidden || !changed("setup", [...permissions, ...downloads].map(({button, ...rest}) => rest))) return;
+  const row = (step, mark) => {
+    const line = el("div", "step" + (step.done ? " done" : "")), text = el("div");
     text.append(el("b", "", step.name), el("small", "", step.detail));
     if (step.progress != null && !step.done) { const bar = el("progress"); bar.value = step.progress; text.append(bar); }
-    row.append(el("span", "mark", step.done ? "✓" : "•"), text);
-    if (step.button) { const button = el("button", "btn", step.button[0]); button.onclick = step.button[1]; row.append(button); }
-    box.append(row);
-  }
-  if (!setup.access.ok) {
-    const row = el("div", "step"), restart = el("button", "btn primary", "Restart Saydown");
+    line.append(el("span", "mark", step.done ? "✓" : mark), text);
+    if (step.button && !step.done) { const button = el("button", "btn", step.button[0]); button.onclick = step.button[1]; line.append(button); }
+    return line;
+  };
+  box.replaceChildren(el("h2", "", gate ? "Welcome to Saydown" : "Finishing setup"));
+  if (gate) {
+    box.append(el("p", "", "Allow these three things and you are ready. macOS asks only once. " + granted + " of 3 done."));
+    permissions.forEach((step, index) => box.append(row(step, String(index + 1))));
+    const line = el("div", "step"), restart = el("button", "btn primary", "Restart Saydown");
     restart.onclick = () => send("/api/restart");
-    row.append(el("span"), el("small", "", "After switching both on, restart so macOS applies them. Saydown restarts by itself when it can tell."), restart);
-    box.append(row);
+    line.append(el("span"), el("small", "", "Saydown restarts by itself once Accessibility and Input Monitoring are on. If it does not, restart it here."), restart);
+    box.append(line, el("h3", "", "Meanwhile, downloading"));
   }
+  downloads.forEach((step) => box.append(row(step, "•")));
 }
 
 let quitting = false;
