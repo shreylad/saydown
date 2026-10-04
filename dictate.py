@@ -10,7 +10,7 @@
 Run:  uv run dictate.py          (needs `ollama serve` running)
 Test: uv run dictate.py --test   (checks the cleanup step and the settings logic)
 """
-import datetime, json, os, queue, re, subprocess, sys, tempfile, threading, time, traceback, urllib.request, uuid
+import datetime, json, math, os, queue, random, re, subprocess, sys, tempfile, threading, time, traceback, urllib.request, uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -679,8 +679,15 @@ def run_window():
 
 # ---- the on-screen pill ------------------------------------------------------------------------------------
 
+BARS, BAR, GAP, PAD = 9, 3, 3, 12  # the pill's level bars: how many, their width, the space between, the side margin
+LEVEL_GAIN = 8  # how far normal speech pushes the bars; raise it for a quiet microphone
+_bars = BARS * BAR + (BARS - 1) * GAP + 2 * PAD
+PILL_SIZES = {"idle": (44, 12), "listening": (_bars, 26), "busy": (_bars, 26), "handsfree": (_bars + 18, 26),
+              "text": (170, 28)}
+
+
 class PillView(AppKit.NSView):
-    """The pill's clickable background."""
+    """The pill: a clickable capsule that draws moving bars while it listens or works."""
 
     def hitTest_(self, point):
         return self  # keep the label from swallowing clicks
@@ -700,15 +707,34 @@ class PillView(AppKit.NSView):
         except Exception:
             traceback.print_exc()
 
+    def drawRect_(self, rect):
+        if self.state in ("idle", "text"):
+            return
+        size = self.bounds().size
+        rounded = AppKit.NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_
+        AppKit.NSColor.colorWithWhite_alpha_(1, 0.55 if self.state == "busy" else 0.95).setFill()
+        for index, value in enumerate(self.bars):
+            height = BAR + value * (size.height - 10 - BAR)
+            rounded(((PAD + index * (BAR + GAP), (size.height - height) / 2), (BAR, height)), BAR / 2, BAR / 2).fill()
+        if self.state == "handsfree":  # a stop square: this recording ends on a click or a tap, not on release
+            rounded(((size.width - PAD - 8, (size.height - 8) / 2), (8, 8)), 2, 2).fill()
+
 
 def make_pill(on_click, on_right_click):
-    """Always-visible pill near the bottom of the screen. Returns show(text); show("") dims it back to idle."""
-    width, height = 170, 32
+    """Always-visible pill near the bottom of the screen. Returns show(state).
+
+    show("listening"), show("handsfree") and show("busy") draw bars; show("") shrinks it back to idle; any other
+    text is shown as words. Set show.level to a function giving the current loudness, 0 to 1.
+    """
     screen = AppKit.NSScreen.mainScreen().frame()
+
+    def frame(state):
+        width, height = PILL_SIZES[state]
+        return (((screen.size.width - width) / 2, 96 - height / 2), (width, height))
+
     # a non-activating panel takes clicks without stealing focus, so pasting still hits your app
     window = AppKit.NSPanel.alloc().initWithContentRect_styleMask_backing_defer_(
-        (((screen.size.width - width) / 2, 80), (width, height)),
-        AppKit.NSWindowStyleMaskBorderless | AppKit.NSWindowStyleMaskNonactivatingPanel,
+        frame("idle"), AppKit.NSWindowStyleMaskBorderless | AppKit.NSWindowStyleMaskNonactivatingPanel,
         AppKit.NSBackingStoreBuffered, False)
     window.setLevel_(AppKit.NSStatusWindowLevel)
     window.setHidesOnDeactivate_(False)
@@ -716,29 +742,61 @@ def make_pill(on_click, on_right_click):
     window.setBackgroundColor_(AppKit.NSColor.clearColor())
     window.setCollectionBehavior_(AppKit.NSWindowCollectionBehaviorCanJoinAllSpaces
                                   | AppKit.NSWindowCollectionBehaviorFullScreenAuxiliary)
-    view = PillView.alloc().initWithFrame_(((0, 0), (width, height)))
+    view = PillView.alloc().initWithFrame_(((0, 0), PILL_SIZES["idle"]))
     view.on_click, view.on_right_click = on_click, on_right_click
+    view.state, view.bars = None, [0.0] * BARS
     view.setToolTip_("Click to dictate. Right-click for history, dictionary and settings.")
     window.setContentView_(view)
     view.setWantsLayer_(True)
-    view.layer().setCornerRadius_(height / 2)
-    view.layer().setBackgroundColor_(AppKit.NSColor.colorWithWhite_alpha_(0, 0.82).CGColor())
+    view.layer().setBackgroundColor_(AppKit.NSColor.colorWithWhite_alpha_(0.04, 0.9).CGColor())
+    view.layer().setBorderWidth_(0.5)
+    view.layer().setBorderColor_(AppKit.NSColor.colorWithWhite_alpha_(1, 0.22).CGColor())
     label = AppKit.NSTextField.labelWithString_("")
-    label.setFrame_(((0, 7), (width, 18)))
+    label.setFrame_(((0, 5), (PILL_SIZES["text"][0], 18)))
     label.setAlignment_(AppKit.NSTextAlignmentCenter)
     label.setTextColor_(AppKit.NSColor.whiteColor())
     label.setFont_(AppKit.NSFont.systemFontOfSize_weight_(13, AppKit.NSFontWeightSemibold))
     view.addSubview_(label)
-    current = [""]
+    current, timer, phase = [""], [None], [0.0]
+    weights = [0.4 + 0.6 * math.sin(math.pi * (i + 0.5) / BARS) for i in range(BARS)]  # taller in the middle
+
+    def tick(_):
+        if view.state == "busy":  # a slow wave travelling along the bars while the text is being written
+            phase[0] += 0.22
+            view.bars = [0.3 + 0.22 * math.sin(phase[0] - i * 0.75) for i in range(BARS)]
+        else:  # each bar chases the voice's loudness, with a little variation so they move like a meter
+            loud = show.level()
+            view.bars = [old + (loud * weight * random.uniform(0.55, 1) - old) * 0.4
+                         for old, weight in zip(view.bars, weights)]
+        view.setNeedsDisplay_(True)
 
     def show(text):
         current[0] = text
 
         def update():
-            label.setStringValue_(text or f"\U0001F399 Click or hold {hotkey()['symbol']}")
-            window.setAlphaValue_(1.0 if text else settings()["idle_alpha"])
+            state = text if text in ("listening", "handsfree", "busy") else "text" if text else "idle"
+            if state != view.state:
+                AppKit.NSAnimationContext.beginGrouping()
+                AppKit.NSAnimationContext.currentContext().setDuration_(0.18)
+                window.animator().setFrame_display_(frame(state), True)
+                AppKit.NSAnimationContext.endGrouping()
+                view.layer().setCornerRadius_(PILL_SIZES[state][1] / 2)
+                if view.state not in ("listening", "handsfree"):
+                    view.bars = [0.0] * BARS
+            view.state = state
+            label.setHidden_(state != "text")
+            label.setStringValue_(text if state == "text" else "")
+            window.setAlphaValue_(settings()["idle_alpha"] if state == "idle" else 1.0)
+            moving = state in ("listening", "handsfree", "busy")
+            if moving and not timer[0]:
+                timer[0] = AppKit.NSTimer.scheduledTimerWithTimeInterval_repeats_block_(1 / 30, True, tick)
+            elif not moving and timer[0]:
+                timer[0].invalidate()
+                timer[0] = None
+            view.setNeedsDisplay_(True)
         AppHelper.callAfter(update)  # AppKit must be touched on the main thread only
     show.refresh = lambda: show(current[0])  # re-apply after a settings change
+    show.level = lambda: 0.0
     window.orderFrontRegardless()
     return show
 
@@ -791,7 +849,7 @@ def main():
                 running.activateWithOptions_(AppKit.NSApplicationActivateIgnoringOtherApps)
 
     show = make_pill(lambda: toggle(), open_settings)
-    show("Loading…")
+    show("busy")
     open_settings()  # the window opens with the app and stays in the Dock while it runs
 
     jobs = queue.Queue()
@@ -821,7 +879,7 @@ def main():
                     return
                 hands_free[0], note[0] = by_click, as_note
                 recording[0] = True
-                show("\U0001F534 Click to stop" if by_click else "\U0001F534 Listening")
+                show("handsfree" if by_click else "listening")
                 print("recording...")
 
     def stop():
@@ -832,8 +890,21 @@ def main():
                 process.kill()
                 process.wait()
                 recorder[0] = spawn()
-                show("Writing…")
+                show("busy")
                 jobs.put((path, note[0]))
+
+    def level():
+        """How loud the last 50 ms of the current recording were, from 0 to 1."""
+        try:
+            path, wanted = recorder[0][1], RATE // 20 * 4
+            with open(path, "rb") as f:
+                f.seek(max(0, os.path.getsize(path) - wanted) // 4 * 4)
+                heard = np.frombuffer(f.read(wanted)[:wanted // 4 * 4], np.float32)
+            return min(1.0, float(np.sqrt(np.mean(heard ** 2))) * LEVEL_GAIN) if len(heard) else 0.0
+        except (OSError, ValueError):
+            return 0.0
+
+    show.level = level
 
     def take_note():
         stop() if recording[0] else start(by_click=True, as_note=True)
@@ -855,7 +926,7 @@ def main():
         if now - pressed_at[0] < TAP and now - last_tap[0] < DOUBLE_TAP and recording[0]:
             with lock:  # second quick tap: keep recording with no key held
                 hands_free[0] = True
-                show(f"\U0001F534 Tap {hotkey()['symbol']} to stop")
+                show("handsfree")
         else:
             if now - pressed_at[0] < TAP:
                 last_tap[0] = now
