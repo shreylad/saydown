@@ -64,9 +64,19 @@ The terminal logs every dictation with the raw transcription beside the cleaned 
 
 ## Rewrite styles
 
-In the window, each dictation has a Rewrite button. Pick a style and the result appears in a card with Copy and Regenerate; nothing is generated until you pick one. Three styles are built in (Grammar, Polite, Sugarcoated). Add, edit, and delete your own in the Styles tab: a name of up to 30 characters and an instruction of up to 300. Custom styles are saved in `styles.json`.
+In the window, each dictation has a Rewrite button. Pick a style and the result appears in a card with Copy and Regenerate; nothing is generated until you pick one. Eight styles are built in (Grammar, Polite, Sugarcoated, Shorter, Bullet points, Summary, Tasks, Email). Add, edit, and delete your own in the Styles tab: a name of up to 30 characters and an instruction of up to 300. Custom styles are saved in `styles.json`.
 
 Every style uses the same prompt, which tells the model to keep your facts, names, and numbers, and to treat the dictation as text to rewrite, never as instructions.
+
+The same panel has a box for a one-off instruction, such as "make it more confident" or "rewrite for my manager", and shows your original words when cleanup changed them.
+
+## Ask
+
+The Ask tab answers questions from your saved dictations, such as "what did I say about pricing?", and lists the dictations it cited. It picks which dictations to show the model by keyword overlap and recency, so it is not semantic search yet.
+
+## Voice commands
+
+Off by default; turn it on in Settings. Within two minutes of a dictation, a short remark such as "make that shorter", "fix the grammar", "delete the last sentence" or "undo that" changes the text that was just typed instead of being typed itself. It works by pressing ⌘Z and pasting the new text, so it assumes you have not typed anything since, and it does nothing useful in apps without undo, such as a terminal.
 
 ## Dictionary
 

@@ -58,7 +58,8 @@
   .chip.add { border-style: dashed; background: none; color: var(--accent); }
   .result { background: var(--bg); border: 1px solid var(--line); border-radius: 10px; padding: 11px 14px; }
   .result h3 { margin: 0 0 4px; font-size: 12px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }
-  .result p { margin: 0 0 9px; overflow-wrap: anywhere; }
+  .result p { margin: 0 0 9px; overflow-wrap: anywhere; white-space: pre-wrap; }
+  .rewrite .add { margin: 0; }
   .result .error { color: var(--danger); }
 
   .style-form { display: grid; gap: 10px; padding: 16px; margin-bottom: 18px; }
@@ -105,6 +106,7 @@
 <nav aria-label="Sections">
   <div class="brand">open<span>-flow</span></div>
   <button data-view="dictation" aria-current="page">Dictation</button>
+  <button data-view="ask">Ask</button>
   <button data-view="dictionary">Dictionary</button>
   <button data-view="styles">Styles</button>
   <button data-view="settings">Settings</button>
@@ -126,6 +128,16 @@
     </div>
     <div id="history"></div>
     <div class="toolbar"><button class="btn danger" id="clear">Clear history</button></div>
+  </section>
+
+  <section id="ask" hidden>
+    <h1>Ask your dictations</h1>
+    <p class="lead">Answers come from your saved dictations and never leave this Mac.</p>
+    <form class="add" id="ask-form">
+      <input type="text" id="question" maxlength="500" placeholder="What did I say about pricing?" aria-label="Question" autocomplete="off">
+      <button class="btn primary" type="submit">Ask</button>
+    </form>
+    <div id="answer"></div>
   </section>
 
   <section id="dictionary" hidden>
@@ -188,6 +200,11 @@
         <span>Save history</span>
         <small>Keep a local list of what you dictate. Turning this off stops new entries.</small>
         <span class="control"><input type="checkbox" id="save-history"></span>
+      </label>
+      <label class="field">
+        <span>Voice commands</span>
+        <small>Right after a dictation, say “make that shorter”, “fix the grammar” or “undo that” to change what was just typed. It presses ⌘Z in the app you are typing in, so it is off until you turn it on.</small>
+        <span class="control"><input type="checkbox" id="voice-commands"></span>
       </label>
     </div>
     <div class="toolbar"><button class="btn" id="quit" type="button">Quit open-flow</button></div>
@@ -264,7 +281,8 @@ async function runRewrite(entry, style, force) {  // one model call per tap; cac
   results.set(key, {status: "loading"});
   renderHistory();
   try {
-    const response = await send("/api/rewrite", {text: entry.text, style: style.id});
+    const how = style.id.startsWith("say:") ? {instruction: style.instruction} : {style: style.id};
+    const response = await send("/api/rewrite", {text: entry.text, ...how});
     const data = await response.json();
     results.set(key, response.ok ? {status: "done", text: data.text} : {status: "error", error: data.error || "That did not work."});
   } catch (error) {
@@ -286,9 +304,25 @@ function rewritePanel(entry) {
   const add = el("button", "chip add", "+ Add style");
   add.onclick = () => { showView("styles"); $("#style-name").focus(); };
   chips.append(add);
-  panel.append(chips);
+  const say = el("form", "add"), instruction = el("input");  // a one-off instruction instead of a saved style
+  instruction.type = "text";
+  instruction.maxLength = 300;
+  instruction.placeholder = "Or say what to change: make it more confident, rewrite for my manager…";
+  instruction.setAttribute("aria-label", "Instruction");
+  say.append(instruction, el("button", "btn", "Run"));
+  say.onsubmit = (event) => {
+    event.preventDefault();
+    const text = instruction.value.trim();
+    if (text && entry.text.trim()) runRewrite(entry, {id: "say:" + text, name: text, instruction: text}, false);
+  };
+  panel.append(chips, say);
+  if (entry.raw && entry.raw !== entry.text) {  // what was actually said, before cleanup
+    const card = el("div", "result");
+    card.append(el("h3", "", "Original words"), el("p", "", entry.raw));
+    panel.append(card);
+  }
   for (const id of tapped) {
-    const style = state.styles.find((s) => s.id === id);
+    const style = id.startsWith("say:") ? {id, name: id.slice(4), instruction: id.slice(4)} : state.styles.find((s) => s.id === id);
     if (!style) continue;  // the style was deleted
     const result = results.get(cacheKey(entry.text, id)) || {status: "loading"};
     const card = el("div", "result"), actions = el("div", "actions");
@@ -432,6 +466,7 @@ function renderSettings() {
   $("#alpha").value = Math.round(state.settings.idle_alpha * 100);
   $("#alpha-value").textContent = "(" + Math.round(state.settings.idle_alpha * 100) + "%)";
   $("#save-history").checked = state.settings.save_history;
+  $("#voice-commands").checked = state.settings.voice_commands;
 }
 
 let quitting = false;
@@ -466,6 +501,27 @@ $("#model").onchange = (event) => post("/api/settings", {model: event.target.val
 $("#alpha").oninput = (event) => $("#alpha-value").textContent = "(" + event.target.value + "%)";
 $("#alpha").onchange = (event) => post("/api/settings", {idle_alpha: event.target.value / 100});
 $("#save-history").onchange = (event) => post("/api/settings", {save_history: event.target.checked});
+$("#voice-commands").onchange = (event) => post("/api/settings", {voice_commands: event.target.checked});
+$("#ask-form").onsubmit = async (event) => {
+  event.preventDefault();
+  const question = $("#question").value.trim(), card = el("div", "result");
+  if (!question) return;
+  card.append(el("p", "muted", "Reading your dictations…"));
+  $("#answer").replaceChildren(card);
+  try {
+    const response = await send("/api/ask", {question}), data = await response.json();
+    if (!response.ok) throw new Error(data.error);
+    card.replaceChildren(el("p", "", data.answer));
+    const cited = data.sources.filter((source) => data.answer.includes("[" + source.n + "]"));
+    if (cited.length) card.append(el("h3", "", "Sources"));
+    for (const source of cited) {
+      const when = new Date(source.ts * 1000).toLocaleString(undefined, {dateStyle: "medium", timeStyle: "short"});
+      card.append(el("p", "muted", "[" + source.n + "] " + when + ": " + source.text));
+    }
+  } catch (error) {
+    card.replaceChildren(el("p", "error", error.message || "Could not reach the app."));
+  }
+};
 $("#clear").onclick = () => {  // two-step confirm; native confirm() dialogs do not show in this window
   if ($("#clear").dataset.armed) { delete $("#clear").dataset.armed; $("#clear").textContent = "Clear history"; post("/api/history/clear"); }
   else { $("#clear").dataset.armed = "1"; $("#clear").textContent = "Click again to delete everything"; setTimeout(() => { delete $("#clear").dataset.armed; $("#clear").textContent = "Clear history"; }, 3000); }
