@@ -78,7 +78,13 @@ The Ask tab answers questions from your saved dictations, such as "what did I sa
 
 Record a note, in the window, records without typing anything: stop it from the same button, the pill, or your shortcut, and the transcript is saved in the list. Use it for meetings and thinking out loud, then open Rewrite and pick Meeting notes, Thought dump, Tasks or Summary. A note is one voice with no speaker labels, and the styles see about 30 minutes of speech at most.
 
-Dictations of up to six words with no filler or correction in them are typed straight from Whisper, without the cleanup model, which makes them faster.
+## How text is cleaned
+
+Most dictations are tidied by rules, with no model call: filler sounds (um, uh, hmm) and stutters are dropped, and words that are nearly a dictionary term are respelled. The cleanup model runs only when you correct yourself ("no wait", "sorry", "I mean", "actually", "scratch that"), because working out what you meant is the one job the rules cannot do. This saves about a second on a typical dictation.
+
+Pasting uses the clipboard, and whatever you had copied is put back straight afterwards.
+
+While a password field has the keyboard, macOS hides key presses from every app, so a shortcut such as ⌘B cannot be seen. The pill says "Shortcut paused" until you leave the field; clicking the pill still works.
 
 ## Voice commands
 

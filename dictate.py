@@ -10,7 +10,7 @@
 Run:  uv run dictate.py          (needs `ollama serve` running)
 Test: uv run dictate.py --test   (checks the cleanup step and the settings logic)
 """
-import datetime, json, math, os, queue, random, re, subprocess, sys, tempfile, threading, time, traceback, urllib.request, uuid
+import ctypes, datetime, difflib, json, math, os, queue, random, re, subprocess, sys, tempfile, threading, time, traceback, urllib.request, uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -46,8 +46,11 @@ LANGUAGES = {
 TAP = 0.3  # a press shorter than this (seconds) is a tap, not a hold
 DOUBLE_TAP = 0.6  # two taps within this many seconds start hands-free recording
 QUIET = 0.1  # a recording whose loudest moment is below this is silence; lower it for a very quiet microphone
-SHORT = 6  # a dictation of up to this many words, with no correction in it, is pasted without the cleanup model
-CUES = re.compile(r"\b(um+|uh+|er+|sorry|wait|scratch|mean|actually)\b", re.I)  # fillers and signs of a correction
+# Signs that the speaker corrected themselves. Only then is the cleanup model worth its second or so; everything
+# else is tidied by the rules in tidy(), which is how the faster dictation apps do it.
+CUES = re.compile(r"\b(sorry|wait|scratch|i mean|actually|rather|rephrase|correction|start over|no,? no)\b", re.I)
+FILLERS = re.compile(r"\b(?:u+h*m+|u+h+|e+r+m*|h+m+|m{2,})\b[,…]*\s*", re.I)  # um, uh, uhm, er, erm, hmm, mm
+STUTTER = re.compile(r"\b(\w+)(?:,?\s+\1\b){2,}|\b(I)(?:,?\s+I\b)+", re.I)  # "the the the", "I I"
 WHISPER = "mlx-community/whisper-large-v3-turbo"
 EMBED_MODEL = "embeddinggemma"  # `ollama pull embeddinggemma`; without it Ask falls back to keyword matching
 OLLAMA = "http://localhost:11434"
@@ -384,10 +387,36 @@ def clean(raw):
     return out if out and len(out) < 2 * len(raw) + 20 else raw
 
 
+def tidy(raw):
+    """Cleanup by rule, with no model: drop filler sounds and stutters, then repair spacing and the capital."""
+    text = STUTTER.sub(lambda match: match.group(1) or match.group(2), FILLERS.sub("", raw))
+    text = re.sub(r"\s+([,.?!;:])", r"\1", re.sub(r"\s{2,}", " ", text))  # no space before punctuation
+    text = re.sub(r"([.?!])[.,]+", r"\1", re.sub(r",([.?!])", r"\1", text))  # marks left behind by a removed filler
+    text = text.lstrip(" ,.").rstrip(" ,")
+    return text[:1].upper() + text[1:]
+
+
+def fuzzy(text):
+    """Respell a word that is nearly a dictionary term, such as "Kubernetis" for Kubernetes."""
+    # ponytail: single words, matched by spelling and first letter; add sound matching (Soundex) if names slip through
+    known = {}
+    for term in term_list():
+        if "->" not in term and " " not in term and len(term) >= 5:
+            known.setdefault(term[0].lower(), {})[term.lower()] = term
+    if not known:
+        return text
+
+    def fix(match):
+        word, terms = match.group(0), known.get(match.group(0)[0].lower(), {})
+        close = difflib.get_close_matches(word.lower(), terms, n=1, cutoff=0.8)
+        return terms[close[0]] if close else word
+
+    return re.sub(r"[^\W\d_]{4,}", fix, text)
+
+
 def polish(raw):
-    """What to type for a transcript: cleaned by the model unless it is short and plain, then respelled."""
-    plain_enough = len(raw.split()) <= SHORT and not CUES.search(raw)
-    return respell(raw if plain_enough else clean(raw))
+    """What to type for a transcript: tidied by rule, or by the model when the speaker corrected themselves."""
+    return respell(fuzzy(clean(raw) if CUES.search(raw) else tidy(raw)))
 
 
 def macro(raw):
@@ -508,10 +537,30 @@ def press(keycode, flags):
 
 
 def paste(text):
-    # ponytail: overwrites the clipboard; save/restore it if that gets annoying
-    subprocess.run("pbcopy", input=text.encode(), check=True)
+    """Type text at the cursor by way of the clipboard, then put back what was on the clipboard before."""
+    board = AppKit.NSPasteboard.generalPasteboard()
+    saved = [{kind: item.dataForType_(kind) for kind in item.types()} for item in board.pasteboardItems() or []]
+    board.clearContents()
+    board.setString_forType_(text, AppKit.NSPasteboardTypeString)
+    ours = board.changeCount()
     # ponytail: key code 9 is V on QWERTY-style layouts; look it up per layout if Dvorak users appear
     press(9, COMMAND)
+
+    def restore():
+        if board.changeCount() != ours:  # something was copied in the meantime; that is the clipboard now
+            return
+        board.clearContents()
+        items = []
+        for kinds in saved:
+            item = AppKit.NSPasteboardItem.alloc().init()
+            for kind, data in kinds.items():
+                if data is not None:
+                    item.setData_forType_(data, kind)
+            items.append(item)
+        if items:
+            board.writeObjects_(items)
+
+    threading.Timer(0.4, restore).start()  # after the app in front has read the clipboard for the paste
 
 
 # ---- settings page server ----------------------------------------------------------------------------------
@@ -1070,6 +1119,9 @@ def main():
             except OSError as e:
                 print("style failed, typing it as usual:", e)
         text = text or polish(raw)
+        if not text:
+            print("skipped: nothing but filler sounds")
+            return
         paste(text + " ")  # trailing space so back-to-back dictations don't run together
         last_paste[0] = {"text": text, "at": time.time(), "before": None}
         print(f"[{time.time() - start:.1f}s] raw:   {raw}\n        clean: {text}")
@@ -1086,8 +1138,20 @@ def main():
         print("loading models...")
         mlx_whisper.transcribe(np.zeros(RATE, np.float32), path_or_hf_repo=WHISPER)
         clean("warm up")
-        idle = "" if access["ok"] else "⚠️ Allow access"  # right-click the pill for what to do
-        show(idle)
+        carbon = ctypes.cdll.LoadLibrary("/System/Library/Frameworks/Carbon.framework/Carbon")
+        carbon.IsSecureEventInputEnabled.restype = ctypes.c_bool
+
+        def idle():  # what the pill says when nothing is happening
+            if not access["ok"]:
+                return "⚠️ Allow access"  # right-click the pill for what to do
+            # While a password field has the keyboard, macOS hides key presses from every app, so a shortcut such
+            # as ⌘B does nothing. Say so instead of looking broken; clicking the pill still works.
+            if carbon.IsSecureEventInputEnabled() and not modifier_only(hotkey()):
+                return "\U0001F512 Shortcut paused"
+            return ""
+
+        shown = idle()
+        show(shown)
         print(f"ready: hold {hotkey()['label']}, double-tap it, or click the pill to dictate")
         print("       right-click the pill for history, dictionary and settings; Ctrl+C to quit")
         while True:
@@ -1098,13 +1162,17 @@ def main():
                 if recording[0] and not hands_free[0] and not key_is_down() and time.time() - pressed_at[0] > 1:
                     print("key release was missed, stopping the recording")
                     stop()
+                if not recording[0] and idle() != shown:
+                    shown = idle()
+                    show(shown)
                 continue
             try:
                 dictate(*job)
             except Exception:
                 traceback.print_exc()
             if jobs.empty() and not recording[0]:
-                show(idle)
+                shown = idle()
+                show(shown)
 
     threading.Thread(target=worker, daemon=True).start()
     AppHelper.runEventLoop(installInterrupt=True)
@@ -1170,12 +1238,17 @@ if __name__ == "__main__":
                {"ts": noon(2), "text": "Remind me to call the dentist."}]
         assert [e["ts"] for e in relevant(old, "what did I say about pricing")] == [noon(1), noon(2)]
         assert relevant(old * 40, "pricing", budget=100)[0]["text"].startswith("Pricing")
-        assert polish("Thanks, see you tomorrow.") == "Thanks, see you tomorrow."  # short and plain: no model call
-        assert "Tuesday" not in polish("Tuesday, no wait, Wednesday works.")  # short, but a correction: cleaned
+        assert polish("Thanks, see you tomorrow.") == "Thanks, see you tomorrow."  # plain: no model call
+        assert "Tuesday" not in polish("Send the report on Tuesday, no wait, Wednesday.")  # a correction: cleaned by the model
+        assert tidy("Um, so I I think, uh, the the the plan is fine.") == "So I think, the plan is fine."
+        assert tidy("That is very very good, hmm.") == "That is very very good."
+        assert tidy("Summer is warm.") == "Summer is warm." and tidy("uh") == "" and tidy("Uh.") == ""
+        assert tidy("Fine. Um. Hello there, erm, Hummer fans.") == "Fine. Hello there, Hummer fans."
         DICTIONARY_BACKUP = DICTIONARY.read_text() if DICTIONARY.exists() else None
         try:
             DICTIONARY.write_text("Siobhan\nx ai -> xAI\n")
             assert terms() == "Siobhan, xAI" and respell("I work at X AI, not at Maxai.") == "I work at xAI, not at Maxai."
+            assert fuzzy("Ask Siobhann's team, not the Siberian one.") == "Ask Siobhan's team, not the Siberian one."
         finally:
             DICTIONARY.write_text(DICTIONARY_BACKUP) if DICTIONARY_BACKUP is not None else DICTIONARY.unlink()
         assert macro("Daily update. Yesterday I shipped the fix.") == ("daily", "Yesterday I shipped the fix.")
