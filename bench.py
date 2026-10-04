@@ -1,4 +1,4 @@
-"""Score a text model on everything Saydown asks of one: uv run --with-requirements <(uv export --script dictate.py) bench.py gemma4:e4b
+"""Score a text model on everything Saydown asks of one: uv run --with-requirements <(uv export --script dictate.py) bench.py mlx-community/gemma-4-e4b-it-5bit
 
 Runs every check without stopping at the first failure and prints pass counts and timings per group.
 """
@@ -17,6 +17,7 @@ def check(group, name, fn, ok):
     try: good = bool(ok(out))
     except Exception: pass
     results.append((group, name, good, str(out).replace("\n", " / ")[:110]))
+dictate.paths[model] = dictate.fetch(model, lambda *a, **k: None)
 dictate.clean("warm up")
 for raw, want, unwanted in [
     ("um so send the report on tuesday no wait wednesday", "Wednesday", "Tuesday"),

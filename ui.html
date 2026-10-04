@@ -206,7 +206,7 @@
     <div class="card">
       <label class="field">
         <span>Cleanup model</span>
-        <small>The local Ollama model that tidies your speech. Smaller is faster.</small>
+        <small>Runs on this Mac. Choosing one you do not have yet downloads it.</small>
         <span class="control"><select id="model"></select></span>
       </label>
       <label class="field">
@@ -478,10 +478,7 @@ function renderSettings() {
   if (document.activeElement && document.activeElement.closest("#settings")) return;  // don't fight the user's hand
   fill($("#microphone"), [["", "Auto-detect"], ...state.microphones.map((name) => [name, name])], state.settings.microphone);
   fill($("#language"), Object.entries(state.languages), state.settings.language);
-  const select = $("#model");
-  const names = state.models.includes(state.settings.model) ? state.models : [state.settings.model, ...state.models];
-  select.replaceChildren(...names.map((name) => el("option", "", name)));
-  select.value = state.settings.model;
+  fill($("#model"), Object.entries(state.models), state.settings.model);
   $("#alpha").value = Math.round(state.settings.idle_alpha * 100);
   $("#alpha-value").textContent = "(" + Math.round(state.settings.idle_alpha * 100) + "%)";
   $("#save-history").checked = state.settings.save_history;
@@ -502,8 +499,7 @@ function renderSetup() {  // the first-run checklist: permissions first, and the
       : "Lets Saydown hear you. Click Allow when macOS asks."});
   downloads.push({done: !setup.loading, name: "Speech model", detail: setup.loading ? "Loading. The first time, this downloads about 1.6 GB and can take several minutes." : "Ready."});
   const size = ai.total ? gigabytes(ai.done) + " of " + gigabytes(ai.total) : "";
-  const detail = {checking: "Checking…", engine: "Downloading the AI engine. " + size, starting: "Starting the AI engine…",
-    model: "Downloading " + ai.name + ". " + size + ".",
+  const detail = {checking: "Checking…", starting: "Loading the AI model…", model: "Downloading the AI model. " + size + ".",
     ready: "Ready.", failed: "Not set up: " + ai.error + ". Dictation still works; Saydown tries again the next time it opens."}[ai.step];
   downloads.push({done: ai.step === "ready", name: "AI features", detail, progress: ai.total ? ai.done / ai.total : null});
   const granted = permissions.filter((step) => step.done).length, gate = granted < permissions.length;

@@ -1,13 +1,13 @@
 # /// script
 # requires-python = ">=3.11"
 # dependencies = [
-#     "mlx-whisper", "sounddevice", "numpy",
+#     "mlx-whisper", "mlx-lm", "mlx-embeddings", "sounddevice", "numpy",
 #     "pyobjc-framework-Cocoa", "pyobjc-framework-Quartz", "pyobjc-framework-WebKit",
 # ]
 # ///
 """Hold right Option, talk, release: cleaned-up text is pasted at your cursor. Fully local.
 
-Run:  uv run dictate.py          (needs `ollama serve` running)
+Run:  uv run dictate.py          (the first run downloads the models)
 Test: uv run dictate.py --test   (checks the cleanup step and the settings logic)
 """
 import ctypes, datetime, difflib, json, math, os, queue, random, re, shutil, subprocess, sys, tempfile, threading, time, traceback, urllib.request, uuid
@@ -41,7 +41,6 @@ access = {"ok": True, "listen": True, "post": True}  # whether macOS lets this a
 # What the setup checklist in the window reports. "loading": the speech model is not in memory yet (the first run
 # downloads it). "mic": True, False (refused) or None (macOS has not asked yet). "ai": how far setup_ai() has got.
 status = {"loading": True, "mic": None, "ai": {"step": "checking"}}
-engine = [None]  # the `ollama serve` process, when this app had to start its own
 # Whisper language codes offered in Settings; "auto" lets Whisper detect the language of each dictation
 LANGUAGES = {
     "auto": "Auto-detect", "en": "English", "hi": "Hindi", "gu": "Gujarati", "es": "Spanish", "fr": "French",
@@ -57,10 +56,17 @@ CUES = re.compile(r"\b(sorry|wait|scratch|i mean|actually|rather|rephrase|correc
 FILLERS = re.compile(r"\b(?:u+h*m+|u+h+|e+r+m*|h+m+|m{2,})\b[,…]*\s*", re.I)  # um, uh, uhm, er, erm, hmm, mm
 STUTTER = re.compile(r"\b(\w+)(?:,?\s+\1\b){2,}|\b(I)(?:,?\s+I\b)+", re.I)  # "the the the", "I I"
 WHISPER = "mlx-community/whisper-large-v3-turbo"
-EMBED_MODEL = "embeddinggemma"  # `ollama pull embeddinggemma`; without it Ask falls back to keyword matching
-OLLAMA = "http://" + os.environ.get("OLLAMA_HOST", "localhost:11434")
-OLLAMA_ZIP = "https://ollama.com/download/Ollama-darwin.zip"
-OLLAMA_TEAM = "3MU9H2V9Y9"  # Ollama's Apple developer team; a downloaded engine must be signed by it to be run
+# The text models offered in Settings, as Hugging Face repositories, best first. Score a candidate with bench.py
+# before adding it: the 5-bit build passes all 42 checks, the 4-bit one misses two.
+MODELS = {
+    "mlx-community/gemma-4-e4b-it-5bit": "Gemma 4 E4B (5.7 GB, recommended)",
+    "mlx-community/gemma-4-e4b-it-4bit": "Gemma 4 E4B, smaller (4.8 GB, misses some corrections)",
+}
+EMBED_MODEL = "mlx-community/embeddinggemma-300m-4bit"  # 0.2 GB; without it Ask falls back to keyword matching
+IDLE = 1800  # seconds unused before the text model, about 5 GB of memory, is dropped; loading it again takes ~3s
+mlx_lock = threading.Lock()  # MLX does one thing at a time: transcribing, writing or embedding
+paths = {}  # model repository -> its folder on disk, once setup_ai() has made sure all of it is there
+text_model, embedder, unload_timer = {}, [], [None]  # what is in memory now
 SETTINGS_PANES = {"accessibility": "Privacy_Accessibility", "input": "Privacy_ListenEvent",
                   "microphone": "Privacy_Microphone"}
 RATE = 16000
@@ -75,12 +81,11 @@ HISTORY = DATA / "history.jsonl"
 SETTINGS = DATA / "settings.json"
 STYLES = DATA / "styles.json"  # rewrite styles you add yourself
 EMBEDDINGS = DATA / "embeddings.npz"  # one vector per saved dictation, so Ask can search by meaning
-OLLAMA_APPS = [Path("/Applications/Ollama.app"), DATA / "Ollama.app"]  # the user's own, or the copy this app fetched
 for _file in (DICTIONARY, HISTORY, SETTINGS, STYLES, EMBEDDINGS):  # data used to live beside the script: move it once
     if (HERE / _file.name).exists() and not _file.exists():
         shutil.move(HERE / _file.name, _file)
 DEFAULTS = {
-    "model": os.environ.get("DICTATE_MODEL", "gemma4:e4b"),
+    "model": os.environ.get("DICTATE_MODEL", next(iter(MODELS))),
     "idle_alpha": 0.3,  # how visible the pill is when idle (0 = invisible, 1 = solid)
     "save_history": True,
     "hotkey": DEFAULT_HOTKEY,
@@ -240,7 +245,10 @@ def settings():
     try:
         mtime = SETTINGS.stat().st_mtime
         if _cached[0] != mtime:
-            _cached[:] = [mtime, DEFAULTS | json.loads(SETTINGS.read_text())]
+            saved = DEFAULTS | json.loads(SETTINGS.read_text())
+            if saved["model"] not in MODELS:  # a name from when Ollama ran the models
+                saved["model"] = DEFAULTS["model"]
+            _cached[:] = [mtime, saved]
         return _cached[1]
     except (OSError, ValueError, TypeError):
         return DEFAULTS
@@ -328,7 +336,9 @@ def valid_terms(items):
 def valid_settings(body):
     new = dict(settings())
     if "model" in body:
-        new["model"] = plain(body["model"], 100) or DEFAULTS["model"]
+        if body["model"] not in MODELS:
+            raise ValueError("unknown model")
+        new["model"] = body["model"]
     if "idle_alpha" in body:
         new["idle_alpha"] = min(1.0, max(0.1, float(body["idle_alpha"])))
     for key in ("save_history", "voice_commands"):
@@ -366,15 +376,6 @@ def save_styles(styles):
     STYLES.write_text(json.dumps(styles, indent=2) + "\n")
 
 
-def models():
-    """The models Ollama has, or None when Ollama is not running or not installed."""
-    try:
-        tags = json.load(urllib.request.urlopen(OLLAMA + "/api/tags", timeout=2))
-        return sorted(m["name"] for m in tags["models"])
-    except Exception:
-        return None
-
-
 # ---- permissions ---------------------------------------------------------------------------------------------
 
 def microphone_allowed():
@@ -402,64 +403,41 @@ def keyboard_access():
 
 # ---- first-run setup of the AI features ----------------------------------------------------------------------
 
-def fetch_engine(note):
-    """Download Ollama into this app's data folder and return it. Nothing is installed anywhere else."""
-    archive = DATA / "Ollama.zip"
-    head = subprocess.run(["curl", "-fsSIL", OLLAMA_ZIP], capture_output=True, text=True).stdout.lower()
-    total = int((re.findall(r"content-length: (\d+)", head) or [0])[-1])
-    download = subprocess.Popen(["curl", "-fsSL", "-o", str(archive), OLLAMA_ZIP])  # the system curl: system certificates
-    while download.poll() is None:
-        note("engine", done=archive.stat().st_size if archive.exists() else 0, total=total)
-        time.sleep(0.5)
-    if download.returncode:
-        raise OSError("could not download the AI engine; is this Mac online?")
-    subprocess.run(["ditto", "-x", "-k", str(archive), str(DATA)], check=True)
-    archive.unlink()
-    app = OLLAMA_APPS[1]
-    valid = subprocess.run(["codesign", "--verify", "--deep", "--strict", str(app)], capture_output=True).returncode == 0
-    signer = subprocess.run(["codesign", "-dv", str(app)], capture_output=True, text=True).stderr
-    if not valid or f"TeamIdentifier={OLLAMA_TEAM}" not in signer:  # never run a download that is not Ollama's
-        shutil.rmtree(app, ignore_errors=True)
-        raise OSError("the downloaded AI engine is not signed by Ollama")
-    return app
+def fetch(repo, note):
+    """Download a model from Hugging Face unless all of it is here already. Returns its folder."""
+    import huggingface_hub as hub
+    try:
+        total = sum(f.size or 0 for f in hub.model_info(repo, files_metadata=True).siblings)
+    except Exception:  # offline: snapshot_download() below uses what is on disk, or says what is missing
+        total = 0
+    blobs = Path(hub.constants.HF_HUB_CACHE) / ("models--" + repo.replace("/", "--")) / "blobs"
+    arrived = threading.Event()
+
+    def watch():  # the files grow in this folder as they arrive
+        while not arrived.wait(0.5):
+            try:
+                note("model", done=sum(f.stat().st_size for f in blobs.iterdir()), total=total)
+            except OSError:
+                pass
+
+    threading.Thread(target=watch, daemon=True).start()
+    try:
+        return hub.snapshot_download(repo)
+    finally:
+        arrived.set()
 
 
-def pull(name, note):
-    """Have Ollama download a model, reporting progress through note()."""
-    req = urllib.request.Request(OLLAMA + "/api/pull", json.dumps({"model": name}).encode(),
-                                 {"Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=120) as events:
-        for line in events:
-            event = json.loads(line)
-            if "error" in event:
-                raise OSError(event["error"])
-            if event.get("total"):
-                note("model", name=name, done=event.get("completed", 0), total=event["total"])
-
-
-def setup_ai(wanted=None):
-    """Make the AI features work on a Mac with nothing installed: find or fetch Ollama, start it, pull the models."""
+def setup_ai():
+    """Make the AI features work on a Mac with nothing installed: download the models, then load the text model."""
     def note(step, **more):
         status["ai"] = {"step": step} | more
 
     try:
-        if models() is None:
-            app = next((a for a in OLLAMA_APPS if a.exists()), None) or fetch_engine(note)
-            note("starting")
-            if app == OLLAMA_APPS[0]:
-                subprocess.run(["open", "-gja", str(app)])  # the user's own Ollama: start it the way they would
-            else:
-                engine[0] = subprocess.Popen([str(app / "Contents/Resources/ollama"), "serve"],
-                                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            for _ in range(120):
-                if models() is not None:
-                    break
-                time.sleep(0.5)
-            else:
-                raise OSError("the AI engine did not start")
-        for name in wanted or (settings()["model"], EMBED_MODEL):
-            if (name if ":" in name else name + ":latest") not in models():
-                pull(name, note)
+        for repo in (settings()["model"], EMBED_MODEL):
+            if repo not in paths:
+                paths[repo] = fetch(repo, note)
+        note("starting")
+        llm("Reply with OK.", "warm up", max_tokens=1)
         note("ready")
     except Exception as e:  # dictation works without any of this; the window says what went wrong
         print("AI setup failed:", e)
@@ -468,15 +446,35 @@ def setup_ai(wanted=None):
 
 # ---- transcript cleanup and pasting ------------------------------------------------------------------------
 
-def ollama(system, user, timeout=30, **options):
-    body = {
-        # the same context size on every call, or Ollama reloads the model each time it changes
-        "model": settings()["model"], "stream": False, "keep_alive": "30m", "options": {"num_ctx": 8192} | options,
-        "think": False,  # reasoning adds ~10s per call for no gain here
-        "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
-    }
-    req = urllib.request.Request(OLLAMA + "/api/chat", json.dumps(body).encode(), {"Content-Type": "application/json"})
-    return json.load(urllib.request.urlopen(req, timeout=timeout))["message"]["content"].strip()
+def unload():
+    import mlx.core as mx
+    with mlx_lock:
+        text_model.clear()
+        mx.clear_cache()
+
+
+def llm(system, user, max_tokens=2048, temperature=1.0):
+    import mlx_lm
+    from mlx_lm.sample_utils import make_sampler
+    repo = settings()["model"]
+    if repo not in paths:  # never download here: a dictation would wait minutes for it
+        raise OSError("the AI model is not downloaded yet")
+    # ponytail: one lock, so a dictation waits behind a long rewrite; give the models a queue if that bites
+    with mlx_lock:
+        if text_model.get("repo") != repo:
+            text_model.clear()
+            text_model.update(repo=repo, pair=mlx_lm.load(paths[repo]))
+        if unload_timer[0]:
+            unload_timer[0].cancel()
+        unload_timer[0] = threading.Timer(IDLE, unload)
+        unload_timer[0].daemon = True
+        unload_timer[0].start()
+        model, tokenizer = text_model["pair"]
+        prompt = tokenizer.apply_chat_template(
+            [{"role": "system", "content": system}, {"role": "user", "content": user}],
+            add_generation_prompt=True, enable_thinking=False)  # reasoning adds ~10s per call for no gain here
+        sampler = make_sampler(temp=temperature, top_p=0.95, top_k=64)  # the sampling Gemma is published with
+        return mlx_lm.generate(model, tokenizer, prompt=prompt, max_tokens=max_tokens, sampler=sampler).strip()
 
 
 def clean(raw):
@@ -485,7 +483,7 @@ def clean(raw):
         system += (f"\n\nThe speaker's dictionary: {terms()}\nIf a word or phrase in the transcript sounds like a "
                    "dictionary entry, it was misheard: replace it with the dictionary spelling. Change nothing else.")
     try:
-        out = ollama(system, f"<transcript>{raw}</transcript>", temperature=0)
+        out = llm(system, f"<transcript>{raw}</transcript>", temperature=0)
     except Exception as e:  # never lose what was said: fall back to the raw transcript
         print("cleanup failed, using raw transcript:", e)
         return raw
@@ -538,8 +536,7 @@ def rewrite(text, style_id):
     """One model call that rewrites text in the given style. Raises if the style is unknown or the call fails."""
     instruction = next(s["instruction"] for s in all_styles() if s["id"] == style_id)
     instruction = instruction.replace("<", "").replace(">", "")  # so a custom style cannot break out of <style>
-    out = ollama(REWRITE_PROMPT.replace("{STYLE_INSTRUCTION}", instruction),
-                 f"<transcript>\n{text}\n</transcript>", timeout=120)
+    out = llm(REWRITE_PROMPT.replace("{STYLE_INSTRUCTION}", instruction), f"<transcript>\n{text}\n</transcript>")
     if not out:
         raise OSError("empty reply")
     return out
@@ -549,8 +546,7 @@ def edit(text, instruction):
     """One model call that applies a free-text instruction to text. Raises OSError if the call fails."""
     instruction = instruction.replace("<", "").replace(">", "")
     # the instruction goes last: smaller models skip a deletion when it comes before the text
-    out = ollama(EDIT_PROMPT, f"<text>\n{text}\n</text>\n<instruction>{instruction}</instruction>",
-                 timeout=60, temperature=0)
+    out = llm(EDIT_PROMPT, f"<text>\n{text}\n</text>\n<instruction>{instruction}</instruction>", temperature=0)
     if not out:
         raise OSError("empty reply")
     return out
@@ -561,7 +557,7 @@ def command(said, previous):
     if "?" in said:  # ponytail: a question is treated as something to type; smaller models call some of them edits
         return "TYPE"
     try:
-        word = ollama(COMMAND_PROMPT, f"<previous>{previous}</previous>\n<said>{said}</said>", temperature=0)
+        word = llm(COMMAND_PROMPT, f"<previous>{previous}</previous>\n<said>{said}</said>", temperature=0)
     except Exception as e:
         print("command check failed, typing it instead:", e)
         return "TYPE"
@@ -573,11 +569,18 @@ def command(said, previous):
 
 
 def embed(texts):
+    import mlx.core as mx
+    import mlx_embeddings
     vectors = []
-    for start in range(0, len(texts), 32):
-        body = json.dumps({"model": EMBED_MODEL, "input": [t[:1500] or " " for t in texts[start:start + 32]]}).encode()
-        req = urllib.request.Request(OLLAMA + "/api/embed", body, {"Content-Type": "application/json"})
-        vectors += json.load(urllib.request.urlopen(req, timeout=120))["embeddings"]
+    with mlx_lock:
+        if not embedder:
+            embedder[:] = mlx_embeddings.load(paths[EMBED_MODEL])
+        model, tokenizer = embedder
+        for start in range(0, len(texts), 32):
+            batch = tokenizer([t[:1500] or " " for t in texts[start:start + 32]], return_tensors="mlx", padding=True,
+                              truncation=True, max_length=512)
+            found = model(batch["input_ids"], attention_mask=batch["attention_mask"]).text_embeds
+            vectors += np.array(found.astype(mx.float32)).tolist()
     vectors = np.array(vectors, np.float32)
     return vectors / np.linalg.norm(vectors, axis=1, keepdims=True)
 
@@ -594,12 +597,13 @@ def by_meaning(entries, question, cache=EMBEDDINGS):
         known = {}
         if cache and cache.exists():
             with np.load(cache) as saved:
-                known = dict(zip(saved["ts"].tolist(), saved["vectors"]))
+                if "model" in saved and str(saved["model"]) == EMBED_MODEL:  # vectors from another model do not compare
+                    known = dict(zip(saved["ts"].tolist(), saved["vectors"]))
         missing = [e for e in entries if e["ts"] not in known]
         if missing:
             known.update(zip((e["ts"] for e in missing), embed([e["text"] for e in missing])))
             if cache:  # ponytail: rewritten whole after new dictations; fine until tens of thousands of entries
-                np.savez(cache, ts=np.array(list(known)), vectors=np.array(list(known.values())))
+                np.savez(cache, model=EMBED_MODEL, ts=np.array(list(known)), vectors=np.array(list(known.values())))
         asked = embed([question])[0]
         return sorted(entries, key=lambda e: float(known[e["ts"]] @ asked), reverse=True)
     except Exception as e:
@@ -628,8 +632,8 @@ def ask(question, entries, rank=by_meaning):
                for n, e in enumerate(relevant(entries, question, rank=rank), 1)]
     listing = "\n".join(f"[{s['n']}] {datetime.datetime.fromtimestamp(s['ts']):%A %Y-%m-%d %H:%M}: {s['text'][:1500]}"
                         for s in sources)
-    answer = ollama(f"{ASK_PROMPT}\n\nToday is {datetime.date.today():%A %Y-%m-%d}.",
-                    f"<history>\n{listing}\n</history>\n\nQuestion: {question}", timeout=90, temperature=0)
+    answer = llm(f"{ASK_PROMPT}\n\nToday is {datetime.date.today():%A %Y-%m-%d}.",
+                 f"<history>\n{listing}\n</history>\n\nQuestion: {question}", temperature=0)
     if not answer:
         raise OSError("empty reply")
     return {"answer": answer, "sources": sources}
@@ -696,10 +700,10 @@ def make_handler(on_settings_change, on_quit, on_note, taking_note, on_restart, 
             if self.path == "/":
                 return self.reply((HERE / "ui.html").read_bytes(), "text/html; charset=utf-8")
             if self.path == "/api/state":
-                entries, installed = read_history(), models()
+                entries = read_history()
                 return self.reply({"history": entries[-300:][::-1], "stats": stats(entries),
                                    "dictionary": term_list(), "settings": settings() | {"hotkey": hotkey()},
-                                   "models": installed or [settings()["model"]], "setup": status | {"access": access},
+                                   "models": MODELS, "setup": status | {"access": access},
                                    "microphones": microphones(), "languages": LANGUAGES,
                                    "styles": all_styles(), "needs_access": not access["ok"], "note": taking_note(),
                                    "capturing": time.time() < capture["until"], "capture_error": capture["error"]})
@@ -716,8 +720,11 @@ def make_handler(on_settings_change, on_quit, on_note, taking_note, on_restart, 
                 if self.path == "/api/dictionary":
                     DICTIONARY.write_text("".join(t + "\n" for t in valid_terms(body["terms"])))
                 elif self.path == "/api/settings":
+                    before = settings()["model"]
                     SETTINGS.write_text(json.dumps(valid_settings(body), indent=2) + "\n")
                     on_settings_change()
+                    if settings()["model"] != before:  # download it if need be, and load it
+                        threading.Thread(target=setup_ai, daemon=True).start()
                 elif self.path == "/api/quit":
                     threading.Timer(0.3, on_quit).start()  # after this reply has gone out
                 elif self.path == "/api/restart":  # after granting permissions, which macOS applies at launch
@@ -751,9 +758,9 @@ def make_handler(on_settings_change, on_quit, on_note, taking_note, on_restart, 
                             raise ValueError("unknown style")
                     try:
                         return self.reply(answer())
-                    except OSError as e:  # includes urllib errors and timeouts
+                    except OSError as e:
                         print(self.path, "failed:", e)
-                        return self.reply({"error": "The model did not answer. Is Ollama running?"}, status=502)
+                        return self.reply({"error": "The AI model is not ready yet. Its download shows in this window."}, status=502)
                 elif self.path == "/api/styles":  # add a custom style
                     styles = custom_styles()
                     if len(styles) >= 50:
@@ -975,8 +982,6 @@ def main():
     def quit_app():
         if settings_window[0] and settings_window[0].poll() is None:
             settings_window[0].terminate()
-        if engine[0]:
-            engine[0].terminate()
         os._exit(0)
 
     def restart():
@@ -1224,8 +1229,9 @@ def main():
         print(f"transcribing {len(audio) / RATE:.1f}s (peak level {np.abs(audio).max():.2f})...")
         start = time.time()
         language = settings()["language"]
-        result = mlx_whisper.transcribe(audio, path_or_hf_repo=WHISPER, initial_prompt=terms() or None,
-                                        language=None if language == "auto" else language)
+        with mlx_lock:
+            result = mlx_whisper.transcribe(audio, path_or_hf_repo=WHISPER, initial_prompt=terms() or None,
+                                            language=None if language == "auto" else language)
         raw = result["text"].strip()
         # Whisper invents words from silence; it also reports how sure it is that nobody spoke
         invented = len(raw.split()) > 6 * len(audio) / RATE + 3  # nobody speaks six words a second
@@ -1275,10 +1281,10 @@ def main():
                 f.write(json.dumps({"ts": time.time(), "text": text, "raw": raw, "audio_s": round(audio_s, 1)}
                                    | extra) + "\n")
 
-    def worker():  # models are loaded and used on this one thread; the main thread belongs to AppKit
+    def worker():  # the main thread belongs to AppKit
         print("loading models...")
-        mlx_whisper.transcribe(np.zeros(RATE, np.float32), path_or_hf_repo=WHISPER)
-        clean("warm up")
+        with mlx_lock:
+            mlx_whisper.transcribe(np.zeros(RATE, np.float32), path_or_hf_repo=WHISPER)
         carbon = ctypes.cdll.LoadLibrary("/System/Library/Frameworks/Carbon.framework/Carbon")
         carbon.IsSecureEventInputEnabled.restype = ctypes.c_bool
 
@@ -1336,6 +1342,8 @@ if __name__ == "__main__":
     if "--window" in sys.argv:
         run_window()
     elif "--test" in sys.argv:
+        setup_ai()
+        assert status["ai"]["step"] == "ready", status["ai"]
         noon = lambda day: datetime.datetime(2026, 10, day, 12).timestamp()
         entries = [{"ts": noon(1), "text": "one two three", "audio_s": 30},
                    {"ts": noon(2), "text": "four five six", "audio_s": 30}]

@@ -24,25 +24,23 @@ For an Apple Silicon Mac running macOS 14 or later. Nothing else needs to be ins
 1. Download `Saydown.dmg` from the [latest release](https://github.com/shreylad/saydown/releases/latest), open it, and drag Saydown into Applications.
 2. Open Saydown. macOS will say it cannot verify the app, because it is not signed with an Apple developer account. Go to System Settings → Privacy & Security, scroll down, and click **Open Anyway**.
 3. Follow the **Setting up Saydown** card in the window. It has an Open Settings button for each permission (Accessibility and Input Monitoring) and restarts Saydown once both are on. macOS also asks for the Microphone; click Allow.
-4. Leave it open while it finishes setting itself up. It downloads the speech model (about 1.6 GB), then the AI engine and model (about 7 GB), showing progress on the same card. You can dictate as soon as the speech model is ready.
+4. Leave it open while it finishes setting itself up. It downloads the speech model (about 1.6 GB), then the AI models (about 6 GB), showing progress on the same card. You can dictate as soon as the speech model is ready.
 
 Hold right Option, talk, release.
 
-Nothing else needs installing. The AI features (cleanup of self-corrections, Rewrite, Ask, voice commands) run on [Ollama](https://ollama.com): if you already have it, Saydown uses yours; if not, it downloads a private copy into its own folder, checks that it is signed by Ollama, and runs it only while Saydown is open. If a download fails, dictation still works and Saydown tries again the next time it opens.
+Nothing else needs installing. The AI features (cleanup of self-corrections, Rewrite, Ask, voice commands) run inside Saydown itself, on a model it downloads from Hugging Face the same way as the speech model. If a download fails, dictation still works and Saydown tries again the next time it opens.
 
 Your dictations, dictionary and settings are kept in `~/Library/Application Support/Saydown`.
 
 ## Run from source
 
-Requirements: an Apple Silicon Mac (16 GB of memory is enough), [uv](https://docs.astral.sh/uv/), and optionally [Ollama](https://ollama.com).
-
+Requirements: an Apple Silicon Mac (16 GB of memory is enough), and [uv](https://docs.astral.sh/uv/).
 
 ```sh
-ollama pull gemma4:e4b
 uv run dictate.py
 ```
 
-The first run downloads the Whisper model (about 1.6 GB). uv installs the Python dependencies on its own.
+The first run downloads the Whisper model (about 1.6 GB) and the AI models (about 6 GB). uv installs the Python dependencies on its own.
 
 macOS will ask the app you launch it from (Terminal, iTerm, ...) for three permissions under System Settings → Privacy & Security. Grant all three, then start it again:
 
@@ -92,7 +90,7 @@ The same panel has a box for a one-off instruction, such as "make it more confid
 
 ## Ask
 
-The Ask tab answers questions from your saved dictations, such as "what did I say about pricing?", and lists the dictations it cited. It finds the dictations closest in meaning to your question, so "how much will we charge" finds what you said about pricing. This needs one extra model, `ollama pull embeddinggemma`; without it Ask matches keywords instead. Questions about a time, such as "what did I say yesterday", are not found by date.
+The Ask tab answers questions from your saved dictations, such as "what did I say about pricing?", and lists the dictations it cited. It finds the dictations closest in meaning to your question, so "how much will we charge" finds what you said about pricing. This uses a second, small model (0.2 GB) that Saydown downloads with the first; until it arrives Ask matches keywords instead. Questions about a time, such as "what did I say yesterday", are not found by date.
 
 ## Notes
 
@@ -134,7 +132,7 @@ x ai -> xAI
 
 | Setting | How | Default |
 |---|---|---|
-| Cleanup model | Settings tab, or `DICTATE_MODEL` environment variable | `gemma4:e4b` |
+| Cleanup model | Settings tab (the choices are `MODELS` at the top of `dictate.py`) | `gemma-4-e4b-it-5bit` |
 | Shortcut | Settings tab: click Change, then press any single modifier key, a function key, or a combination such as ⌘E | right Option |
 | Microphone | Settings tab | system default |
 | Dictation language | Settings tab | auto-detect |
@@ -142,19 +140,18 @@ x ai -> xAI
 | Save history | Settings tab | on |
 | Whisper model | `WHISPER` at the top of `dictate.py` | `whisper-large-v3-turbo` |
 
-On a 16 GB M5 MacBook Air, measured on the cleanup step alone:
+On a 16 GB M5 MacBook Air, scored with `bench.py` (42 checks of cleanup, rewriting, editing, voice commands and Ask):
 
-| Model | Speed | An 82-second dictation | Notes |
+| Model | Score | A typical cleanup | Notes |
 |---|---|---|---|
-| `gemma4:e2b` | ~115 tokens/s | 2.0s | Rewrites more than asked |
-| `gemma4:e4b` | ~68 tokens/s | 3.4s | Faithful; the default |
-| `gemma4:12b` | ~16 tokens/s | 14.5s | Faithful, too slow for long dictations |
+| `gemma-4-e4b-it-5bit` | 42/42 | 0.6s | The default; 5.7 GB |
+| `gemma-4-e4b-it-4bit` | 40/42 | 0.6s | 4.8 GB; missed one self-correction and one voice command |
 
 ## How it works
 
 1. A native macOS key monitor watches for the hotkey and `sounddevice` records while it is held.
 2. `mlx-whisper` transcribes the audio on the GPU.
-3. Ollama rewrites the transcript using the prompt in `dictate.py`.
+3. The cleanup model rewrites the transcript using the prompt in `dictate.py`.
 4. The result goes to the clipboard and is pasted with Cmd+V.
 
 The pill is a small AppKit panel drawn with PyObjC. The window is `ui.html` shown in a WebKit view; it talks to the dictation process over a localhost-only server that rejects requests from any other website.
