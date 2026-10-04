@@ -4,3 +4,4 @@ history.jsonl
 settings.json
 styles.json
 embeddings.npz
+dist/

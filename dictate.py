@@ -10,7 +10,7 @@
 Run:  uv run dictate.py          (needs `ollama serve` running)
 Test: uv run dictate.py --test   (checks the cleanup step and the settings logic)
 """
-import ctypes, datetime, difflib, json, math, os, queue, random, re, subprocess, sys, tempfile, threading, time, traceback, urllib.request, uuid
+import ctypes, datetime, difflib, json, math, os, queue, random, re, shutil, subprocess, sys, tempfile, threading, time, traceback, urllib.request, uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -37,6 +37,7 @@ KEY_NAMES = F_KEYS | {49: "Space", 36: "Return", 48: "Tab", 51: "Delete", 53: "E
 DEFAULT_HOTKEY = {"keycode": 61, "mods": 0, "label": "Right ⌥", "symbol": "⌥"}
 capture = {"until": 0.0, "error": ""}  # set by the settings page while it waits for you to press a new shortcut
 access = {"ok": True}  # False when macOS has not yet allowed this app to watch and send keystrokes
+status = {"loading": True}  # until the speech model is in memory; the first run downloads it, which takes minutes
 # Whisper language codes offered in Settings; "auto" lets Whisper detect the language of each dictation
 LANGUAGES = {
     "auto": "Auto-detect", "en": "English", "hi": "Hindi", "gu": "Gujarati", "es": "Spanish", "fr": "French",
@@ -58,13 +59,17 @@ RATE = 16000
 PORT = 8737  # the settings window talks to this process over localhost
 HOST = f"127.0.0.1:{PORT}"
 
-# ponytail: user data lives beside the script; move to ~/Library/Application Support when this becomes an app
-HERE = Path(__file__).parent
-DICTIONARY = HERE / "dictionary.txt"  # names/jargon, one per line
-HISTORY = HERE / "history.jsonl"
-SETTINGS = HERE / "settings.json"
-STYLES = HERE / "styles.json"  # rewrite styles you add yourself
-EMBEDDINGS = HERE / "embeddings.npz"  # one vector per saved dictation, so Ask can search by meaning
+HERE = Path(__file__).parent  # the code and the page; inside the app when installed, so never written to
+DATA = Path.home() / "Library/Application Support/Saydown"  # everything the user owns
+DATA.mkdir(parents=True, exist_ok=True)
+DICTIONARY = DATA / "dictionary.txt"  # names/jargon, one per line
+HISTORY = DATA / "history.jsonl"
+SETTINGS = DATA / "settings.json"
+STYLES = DATA / "styles.json"  # rewrite styles you add yourself
+EMBEDDINGS = DATA / "embeddings.npz"  # one vector per saved dictation, so Ask can search by meaning
+for _file in (DICTIONARY, HISTORY, SETTINGS, STYLES, EMBEDDINGS):  # data used to live beside the script: move it once
+    if (HERE / _file.name).exists() and not _file.exists():
+        shutil.move(HERE / _file.name, _file)
 DEFAULTS = {
     "model": os.environ.get("DICTATE_MODEL", "gemma4:e4b"),
     "idle_alpha": 0.3,  # how visible the pill is when idle (0 = invisible, 1 = solid)
@@ -353,11 +358,12 @@ def save_styles(styles):
 
 
 def models():
+    """The models Ollama has, or None when Ollama is not running or not installed."""
     try:
         tags = json.load(urllib.request.urlopen(OLLAMA + "/api/tags", timeout=2))
         return sorted(m["name"] for m in tags["models"])
     except Exception:
-        return [settings()["model"]]
+        return None
 
 
 # ---- transcript cleanup and pasting ------------------------------------------------------------------------
@@ -590,10 +596,13 @@ def make_handler(on_settings_change, on_quit, on_note, taking_note):
             if self.path == "/":
                 return self.reply((HERE / "ui.html").read_bytes(), "text/html; charset=utf-8")
             if self.path == "/api/state":
-                entries = read_history()
+                entries, installed = read_history(), models()
+                # dictation works without Ollama; cleanup of corrections, Rewrite and Ask need it and a model
+                ai = "no_ollama" if installed is None else "ok" if settings()["model"] in installed else "no_model"
                 return self.reply({"history": entries[-300:][::-1], "stats": stats(entries),
                                    "dictionary": term_list(), "settings": settings() | {"hotkey": hotkey()},
-                                   "models": models(), "microphones": microphones(), "languages": LANGUAGES,
+                                   "models": installed or [settings()["model"]], "ai": ai, "loading": status["loading"],
+                                   "microphones": microphones(), "languages": LANGUAGES,
                                    "styles": all_styles(), "needs_access": not access["ok"], "note": taking_note(),
                                    "capturing": time.time() < capture["until"], "capture_error": capture["error"]})
             self.reply({"error": "not found"}, status=404)
@@ -1152,6 +1161,7 @@ def main():
 
         shown = idle()
         show(shown)
+        status["loading"] = False
         print(f"ready: hold {hotkey()['label']}, double-tap it, or click the pill to dictate")
         print("       right-click the pill for history, dictionary and settings; Ctrl+C to quit")
         while True:

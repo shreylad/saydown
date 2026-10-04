@@ -17,13 +17,25 @@ A local, private take on Wispr Flow for Apple Silicon Macs. Your audio and text 
 - **On-screen indicator.** The pill turns solid and shows "Listening" and "Writing…" so you know it heard you.
 - **Never loses a dictation.** If the cleanup model is unavailable, the raw transcript is pasted instead.
 
-## Requirements
+## Install
 
-- An Apple Silicon Mac (16 GB of memory is enough)
-- [uv](https://docs.astral.sh/uv/)
-- [Ollama](https://ollama.com), running
+For an Apple Silicon Mac running macOS 14 or later. Nothing else needs to be installed first.
 
-## Setup
+1. Download `Saydown.dmg` from the [latest release](https://github.com/shreylad/saydown/releases/latest), open it, and drag Saydown into Applications.
+2. Open Saydown. macOS will say it cannot verify the app, because it is not signed with an Apple developer account. Go to System Settings → Privacy & Security, scroll down, and click **Open Anyway**.
+3. In the same Privacy & Security page, turn Saydown on under **Accessibility** and **Input Monitoring**, then quit Saydown and open it again. Allow the **Microphone** when it asks on your first dictation.
+4. Wait for the first start to finish: it downloads the speech model (about 1.6 GB) once.
+
+Hold right Option, talk, release. That is all dictation needs.
+
+The AI features are optional: cleanup of self-corrections, Rewrite, Ask and voice commands use a local model through [Ollama](https://ollama.com). Install Ollama, open it, and run `ollama pull gemma4:e4b` (and `ollama pull embeddinggemma` for Ask to search by meaning). The window tells you when these are missing.
+
+Your dictations, dictionary and settings are kept in `~/Library/Application Support/Saydown`.
+
+## Run from source
+
+Requirements: an Apple Silicon Mac (16 GB of memory is enough), [uv](https://docs.astral.sh/uv/), and optionally [Ollama](https://ollama.com).
+
 
 ```sh
 ollama pull gemma4:e4b
@@ -40,7 +52,7 @@ macOS will ask the app you launch it from (Terminal, iTerm, ...) for three permi
 | Input Monitoring | Seeing the hotkey |
 | Accessibility | Pasting at your cursor |
 
-## Install as an app
+### As an app, while developing
 
 ```sh
 ./install-app.sh
@@ -49,6 +61,14 @@ macOS will ask the app you launch it from (Terminal, iTerm, ...) for three permi
 This builds `Saydown.app` in your Applications folder, so you can start it from Launchpad or Spotlight with no terminal. Its window opens with it and it stays in the Dock; opening it again, or clicking its Dock icon, brings the window back. Quit from the Dock, with ⌘Q, or from the Settings tab. Add it under System Settings → General → Login Items to start it when you log in.
 
 The app has its own identity, so macOS asks for Microphone, Accessibility, and Input Monitoring again, this time for Saydown; grant them, quit, and reopen. It is a small launcher tied to this folder and your `uv` install, not a self-contained download: run the script again if you move the folder. It needs Apple's Command Line Tools for the compiler. The log is at `~/Library/Logs/saydown.log`.
+
+### Building the download
+
+```sh
+./install-app.sh --release
+```
+
+This builds `dist/Saydown.app` and `dist/Saydown.dmg` with Python and every package inside, so it runs on a Mac with nothing installed. It is ad-hoc signed; signing with an Apple Developer ID and notarising it would remove the "cannot verify" step for people who download it.
 
 ## Usage
 
@@ -94,7 +114,7 @@ With voice commands on, opening with a style name types the rest in that style: 
 
 ## Dictionary
 
-Add terms in the Dictionary tab of the window, or edit `dictionary.txt` next to `dictate.py`, one term per line:
+Add terms in the Dictionary tab of the window, or edit `dictionary.txt` in `~/Library/Application Support/Saydown`, one term per line:
 
 ```
 Reykjavík
@@ -139,7 +159,7 @@ On a 16 GB M5 MacBook Air, measured on the cleanup step alone:
 
 The pill is a small AppKit panel drawn with PyObjC. The window is `ui.html` shown in a WebKit view; it talks to the dictation process over a localhost-only server that rejects requests from any other website.
 
-Your history, dictionary and settings are plain files beside the script (`history.jsonl`, `dictionary.txt`, `settings.json`, `styles.json`) and are git-ignored.
+Your history, dictionary and settings are plain files in `~/Library/Application Support/Saydown` (`history.jsonl`, `dictionary.txt`, `settings.json`, `styles.json`).
 
 The logic is in `dictate.py`; the window's layout is in `ui.html`.
 
