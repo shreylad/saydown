@@ -76,7 +76,7 @@ The Ask tab answers questions from your saved dictations, such as "what did I sa
 
 ## Voice commands
 
-Off by default; turn it on in Settings. Within two minutes of a dictation, a short remark such as "make that shorter", "fix the grammar", "delete the last sentence" or "undo that" changes the text that was just typed instead of being typed itself. It works by pressing ⌘Z and pasting the new text, so it assumes you have not typed anything since, and it does nothing useful in apps without undo, such as a terminal.
+Off by default; turn it on in Settings. Within two minutes of a dictation, a short remark such as "make that shorter", "fix the grammar", "delete the last sentence" or "undo that" changes the text that was just typed instead of being typed itself. An edit has to point at the text with "that", "this", "it", or a part of it such as "the last sentence"; anything else, and any question, is typed as usual. It works by pressing ⌘Z and pasting the new text, so it assumes you have not typed anything since, and it does nothing useful in apps without undo, such as a terminal.
 
 ## Dictionary
 
