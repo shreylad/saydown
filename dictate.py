@@ -36,8 +36,12 @@ KEY_NAMES = F_KEYS | {49: "Space", 36: "Return", 48: "Tab", 51: "Delete", 53: "E
                       123: "←", 124: "→", 125: "↓", 126: "↑"}
 DEFAULT_HOTKEY = {"keycode": 61, "mods": 0, "label": "Right ⌥", "symbol": "⌥"}
 capture = {"until": 0.0, "error": ""}  # set by the settings page while it waits for you to press a new shortcut
-access = {"ok": True}  # False when macOS has not yet allowed this app to watch and send keystrokes
-status = {"loading": True}  # until the speech model is in memory; the first run downloads it, which takes minutes
+access = {"ok": True, "listen": True, "post": True}  # whether macOS lets this app watch and send keystrokes
+# What the setup card in the window reports. "loading": the speech model is not in memory yet (the first run
+# downloads it). "mic": False once a recording came back as pure silence, which is what a refused microphone gives.
+# "ai": how far setup_ai() has got.
+status = {"loading": True, "mic": True, "ai": {"step": "checking"}}
+engine = [None]  # the `ollama serve` process, when this app had to start its own
 # Whisper language codes offered in Settings; "auto" lets Whisper detect the language of each dictation
 LANGUAGES = {
     "auto": "Auto-detect", "en": "English", "hi": "Hindi", "gu": "Gujarati", "es": "Spanish", "fr": "French",
@@ -54,7 +58,11 @@ FILLERS = re.compile(r"\b(?:u+h*m+|u+h+|e+r+m*|h+m+|m{2,})\b[,…]*\s*", re.I)  
 STUTTER = re.compile(r"\b(\w+)(?:,?\s+\1\b){2,}|\b(I)(?:,?\s+I\b)+", re.I)  # "the the the", "I I"
 WHISPER = "mlx-community/whisper-large-v3-turbo"
 EMBED_MODEL = "embeddinggemma"  # `ollama pull embeddinggemma`; without it Ask falls back to keyword matching
-OLLAMA = "http://localhost:11434"
+OLLAMA = "http://" + os.environ.get("OLLAMA_HOST", "localhost:11434")
+OLLAMA_ZIP = "https://ollama.com/download/Ollama-darwin.zip"
+OLLAMA_TEAM = "3MU9H2V9Y9"  # Ollama's Apple developer team; a downloaded engine must be signed by it to be run
+SETTINGS_PANES = {"accessibility": "Privacy_Accessibility", "input": "Privacy_ListenEvent",
+                  "microphone": "Privacy_Microphone"}
 RATE = 16000
 PORT = 8737  # the settings window talks to this process over localhost
 HOST = f"127.0.0.1:{PORT}"
@@ -67,6 +75,7 @@ HISTORY = DATA / "history.jsonl"
 SETTINGS = DATA / "settings.json"
 STYLES = DATA / "styles.json"  # rewrite styles you add yourself
 EMBEDDINGS = DATA / "embeddings.npz"  # one vector per saved dictation, so Ask can search by meaning
+OLLAMA_APPS = [Path("/Applications/Ollama.app"), DATA / "Ollama.app"]  # the user's own, or the copy this app fetched
 for _file in (DICTIONARY, HISTORY, SETTINGS, STYLES, EMBEDDINGS):  # data used to live beside the script: move it once
     if (HERE / _file.name).exists() and not _file.exists():
         shutil.move(HERE / _file.name, _file)
@@ -366,6 +375,72 @@ def models():
         return None
 
 
+# ---- first-run setup of the AI features ----------------------------------------------------------------------
+
+def fetch_engine(note):
+    """Download Ollama into this app's data folder and return it. Nothing is installed anywhere else."""
+    archive = DATA / "Ollama.zip"
+    head = subprocess.run(["curl", "-fsSIL", OLLAMA_ZIP], capture_output=True, text=True).stdout.lower()
+    total = int((re.findall(r"content-length: (\d+)", head) or [0])[-1])
+    download = subprocess.Popen(["curl", "-fsSL", "-o", str(archive), OLLAMA_ZIP])  # the system curl: system certificates
+    while download.poll() is None:
+        note("engine", done=archive.stat().st_size if archive.exists() else 0, total=total)
+        time.sleep(0.5)
+    if download.returncode:
+        raise OSError("could not download the AI engine; is this Mac online?")
+    subprocess.run(["ditto", "-x", "-k", str(archive), str(DATA)], check=True)
+    archive.unlink()
+    app = OLLAMA_APPS[1]
+    valid = subprocess.run(["codesign", "--verify", "--deep", "--strict", str(app)], capture_output=True).returncode == 0
+    signer = subprocess.run(["codesign", "-dv", str(app)], capture_output=True, text=True).stderr
+    if not valid or f"TeamIdentifier={OLLAMA_TEAM}" not in signer:  # never run a download that is not Ollama's
+        shutil.rmtree(app, ignore_errors=True)
+        raise OSError("the downloaded AI engine is not signed by Ollama")
+    return app
+
+
+def pull(name, note):
+    """Have Ollama download a model, reporting progress through note()."""
+    req = urllib.request.Request(OLLAMA + "/api/pull", json.dumps({"model": name}).encode(),
+                                 {"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=120) as events:
+        for line in events:
+            event = json.loads(line)
+            if "error" in event:
+                raise OSError(event["error"])
+            if event.get("total"):
+                note("model", name=name, done=event.get("completed", 0), total=event["total"])
+
+
+def setup_ai(wanted=None):
+    """Make the AI features work on a Mac with nothing installed: find or fetch Ollama, start it, pull the models."""
+    def note(step, **more):
+        status["ai"] = {"step": step} | more
+
+    try:
+        if models() is None:
+            app = next((a for a in OLLAMA_APPS if a.exists()), None) or fetch_engine(note)
+            note("starting")
+            if app == OLLAMA_APPS[0]:
+                subprocess.run(["open", "-gja", str(app)])  # the user's own Ollama: start it the way they would
+            else:
+                engine[0] = subprocess.Popen([str(app / "Contents/Resources/ollama"), "serve"],
+                                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            for _ in range(120):
+                if models() is not None:
+                    break
+                time.sleep(0.5)
+            else:
+                raise OSError("the AI engine did not start")
+        for name in wanted or (settings()["model"], EMBED_MODEL):
+            if (name if ":" in name else name + ":latest") not in models():
+                pull(name, note)
+        note("ready")
+    except Exception as e:  # dictation works without any of this; the window says what went wrong
+        print("AI setup failed:", e)
+        note("failed", error=str(e))
+
+
 # ---- transcript cleanup and pasting ------------------------------------------------------------------------
 
 def ollama(system, user, timeout=30, **options):
@@ -571,7 +646,7 @@ def paste(text):
 
 # ---- settings page server ----------------------------------------------------------------------------------
 
-def make_handler(on_settings_change, on_quit, on_note, taking_note):
+def make_handler(on_settings_change, on_quit, on_note, taking_note, on_restart):
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):
             if os.environ.get("DICTATE_DEBUG"):
@@ -597,11 +672,9 @@ def make_handler(on_settings_change, on_quit, on_note, taking_note):
                 return self.reply((HERE / "ui.html").read_bytes(), "text/html; charset=utf-8")
             if self.path == "/api/state":
                 entries, installed = read_history(), models()
-                # dictation works without Ollama; cleanup of corrections, Rewrite and Ask need it and a model
-                ai = "no_ollama" if installed is None else "ok" if settings()["model"] in installed else "no_model"
                 return self.reply({"history": entries[-300:][::-1], "stats": stats(entries),
                                    "dictionary": term_list(), "settings": settings() | {"hotkey": hotkey()},
-                                   "models": installed or [settings()["model"]], "ai": ai, "loading": status["loading"],
+                                   "models": installed or [settings()["model"]], "setup": status | {"access": access},
                                    "microphones": microphones(), "languages": LANGUAGES,
                                    "styles": all_styles(), "needs_access": not access["ok"], "note": taking_note(),
                                    "capturing": time.time() < capture["until"], "capture_error": capture["error"]})
@@ -622,6 +695,11 @@ def make_handler(on_settings_change, on_quit, on_note, taking_note):
                     on_settings_change()
                 elif self.path == "/api/quit":
                     threading.Timer(0.3, on_quit).start()  # after this reply has gone out
+                elif self.path == "/api/restart":  # after granting permissions, which macOS applies at launch
+                    threading.Timer(0.3, on_restart).start()
+                elif self.path == "/api/open-settings":  # the page of System Settings where a permission is granted
+                    subprocess.run(["open", "x-apple.systempreferences:com.apple.preference.security?"
+                                    + SETTINGS_PANES[body["pane"]]], check=True)
                 elif self.path == "/api/hotkey/capture":  # the next key or combination pressed becomes the shortcut
                     capture.update(until=time.time() + 10, error="")
                 elif self.path in ("/api/rewrite", "/api/ask"):
@@ -870,17 +948,25 @@ def main():
     def quit_app():
         if settings_window[0] and settings_window[0].poll() is None:
             settings_window[0].terminate()
+        if engine[0]:
+            engine[0].terminate()
         os._exit(0)
+
+    def restart():
+        if os.environ.get("SAYDOWN_APP"):  # reopen the app a moment after this process has gone
+            subprocess.Popen(["/bin/sh", "-c", 'sleep 1; open "$SAYDOWN_APP"'], start_new_session=True)
+        quit_app()
 
     settings_window = [None]
     try:  # the port doubles as the single-instance lock
         server = ThreadingHTTPServer(("127.0.0.1", PORT), make_handler(lambda: show.refresh(), quit_app, lambda: take_note(),
-                                                                       lambda: recording[0] and note[0]))
+                                                                       lambda: recording[0] and note[0], restart))
     except OSError:
         print("Saydown is already running; opening its window")
         open_window()
         return
     threading.Thread(target=server.serve_forever, daemon=True).start()
+    threading.Thread(target=setup_ai, daemon=True).start()
 
     import mlx_whisper  # slow to import, and the settings window process never needs it
 
@@ -888,7 +974,7 @@ def main():
     listen, post = Quartz.CGPreflightListenEventAccess(), Quartz.CGPreflightPostEventAccess()
     print(f"permissions: Input Monitoring {'granted' if listen else 'MISSING'}, "
           f"Accessibility {'granted' if post else 'MISSING'}")
-    access["ok"] = bool(listen and post)
+    access.update(ok=bool(listen and post), listen=bool(listen), post=bool(post))
     if not access["ok"]:
         print("waiting for Accessibility and Input Monitoring permission; grant both, then relaunch")
         Quartz.CGRequestListenEventAccess()
@@ -918,6 +1004,21 @@ def main():
         return subprocess.Popen([sys.executable, "-c", RECORDER, path, str(RATE)], stdin=subprocess.PIPE), path
 
     recorder = [spawn()]
+    asked = DATA / "microphone-asked"
+    if not asked.exists():  # first launch: a throwaway recording makes macOS ask for the microphone now, during
+        def ask_for_microphone():  # setup, rather than in the middle of the first sentence
+            probe, path = spawn()
+            time.sleep(2)
+            try:
+                probe.stdin.write(b"\n")
+                probe.stdin.flush()
+                time.sleep(1)
+            except OSError:
+                pass
+            probe.kill()
+            Path(path).unlink(missing_ok=True)
+            asked.touch()
+        threading.Thread(target=ask_for_microphone, daemon=True).start()
     lock = threading.Lock()
     recording = [False]
     note = [False]  # the current recording is a note: saved to history, not typed
@@ -1086,6 +1187,7 @@ def main():
         if len(audio) < RATE * TAP:  # accidental tap; Whisper invents text from silence
             print(f"skipped: only {len(audio) / RATE:.1f}s recorded")
             return
+        status["mic"] = bool(audio.any())  # a refused microphone delivers exact zeros; a quiet room never does
         if np.abs(audio).max() < QUIET:  # Whisper writes paragraphs of invented text for near-silence
             print(f"skipped: too quiet to be speech (peak level {np.abs(audio).max():.2f})")
             return
@@ -1153,13 +1255,15 @@ def main():
         def idle():  # what the pill says when nothing is happening
             if not access["ok"]:
                 return "⚠️ Allow access"  # right-click the pill for what to do
+            if not status["mic"]:
+                return "⚠️ Allow microphone"
             # While a password field has the keyboard, macOS hides key presses from every app, so a shortcut such
             # as ⌘B does nothing. Say so instead of looking broken; clicking the pill still works.
             if carbon.IsSecureEventInputEnabled() and not modifier_only(hotkey()):
                 return "\U0001F512 Shortcut paused"
             return ""
 
-        shown = idle()
+        shown, recheck = idle(), 0.0
         show(shown)
         status["loading"] = False
         print(f"ready: hold {hotkey()['label']}, double-tap it, or click the pill to dictate")
@@ -1172,6 +1276,11 @@ def main():
                 if recording[0] and not hands_free[0] and not key_is_down() and time.time() - pressed_at[0] > 1:
                     print("key release was missed, stopping the recording")
                     stop()
+                if not access["ok"] and time.time() > recheck:  # granted in System Settings meanwhile?
+                    recheck = time.time() + 2
+                    if Quartz.CGPreflightListenEventAccess() and Quartz.CGPreflightPostEventAccess():
+                        print("permissions granted, restarting to use them")
+                        restart()
                 if not recording[0] and idle() != shown:
                     shown = idle()
                     show(shown)

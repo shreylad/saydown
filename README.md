@@ -23,12 +23,12 @@ For an Apple Silicon Mac running macOS 14 or later. Nothing else needs to be ins
 
 1. Download `Saydown.dmg` from the [latest release](https://github.com/shreylad/saydown/releases/latest), open it, and drag Saydown into Applications.
 2. Open Saydown. macOS will say it cannot verify the app, because it is not signed with an Apple developer account. Go to System Settings → Privacy & Security, scroll down, and click **Open Anyway**.
-3. In the same Privacy & Security page, turn Saydown on under **Accessibility** and **Input Monitoring**, then quit Saydown and open it again. Allow the **Microphone** when it asks on your first dictation.
-4. Wait for the first start to finish: it downloads the speech model (about 1.6 GB) once.
+3. Follow the **Setting up Saydown** card in the window. It has an Open Settings button for each permission (Accessibility and Input Monitoring) and restarts Saydown once both are on. macOS also asks for the Microphone; click Allow.
+4. Leave it open while it finishes setting itself up. It downloads the speech model (about 1.6 GB), then the AI engine and model (about 7 GB), showing progress on the same card. You can dictate as soon as the speech model is ready.
 
-Hold right Option, talk, release. That is all dictation needs.
+Hold right Option, talk, release.
 
-The AI features are optional: cleanup of self-corrections, Rewrite, Ask and voice commands use a local model through [Ollama](https://ollama.com). Install Ollama, open it, and run `ollama pull gemma4:e4b` (and `ollama pull embeddinggemma` for Ask to search by meaning). The window tells you when these are missing.
+Nothing else needs installing. The AI features (cleanup of self-corrections, Rewrite, Ask, voice commands) run on [Ollama](https://ollama.com): if you already have it, Saydown uses yours; if not, it downloads a private copy into its own folder, checks that it is signed by Ollama, and runs it only while Saydown is open. If a download fails, dictation still works and Saydown tries again the next time it opens.
 
 Your dictations, dictionary and settings are kept in `~/Library/Application Support/Saydown`.
 
