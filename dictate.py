@@ -142,7 +142,7 @@ import os, sys
 import sounddevice as sd
 name = sys.stdin.readline()
 if not name:
-    os._exit(0)  # open-flow quit before a recording started
+    os._exit(0)  # Saydown quit before a recording started
 name = name.strip()
 device = next((i for i, d in enumerate(sd.query_devices())
                if d["name"] == name and d["max_input_channels"] > 0), None)
@@ -152,7 +152,7 @@ out = open(sys.argv[1], "wb", buffering=0)
 stream = sd.RawInputStream(device=device, samplerate=int(sys.argv[2]), channels=1, dtype="float32",
                            callback=lambda data, *_: out.write(data))
 stream.start()
-sys.stdin.read()  # returns only if open-flow goes away
+sys.stdin.read()  # returns only if Saydown goes away
 os._exit(0)
 """
 
@@ -641,17 +641,17 @@ class WindowDelegate(AppKit.NSObject):
 def run_window():
     import WebKit
     # this process is plain Python, so tell macOS what to call it in the menu bar
-    Foundation.NSBundle.mainBundle().infoDictionary()["CFBundleName"] = "open-flow"
+    Foundation.NSBundle.mainBundle().infoDictionary()["CFBundleName"] = "Saydown"
     app = AppKit.NSApplication.sharedApplication()
     app.setActivationPolicy_(AppKit.NSApplicationActivationPolicyRegular)
-    icon = AppKit.NSImage.alloc().initWithContentsOfFile_(os.environ.get("OPEN_FLOW_ICON", ""))
+    icon = AppKit.NSImage.alloc().initWithContentsOfFile_(os.environ.get("SAYDOWN_ICON", ""))
     if icon:
         app.setApplicationIconImage_(icon)
     delegate = WindowDelegate.alloc().init()
     app.setDelegate_(delegate)
     # the Edit menu is what makes Cmd+C and Cmd+V work inside the page's text fields
     bar = AppKit.NSMenu.alloc().init()
-    for title, items in [("open-flow", [("Quit open-flow", "terminate:", "q")]),
+    for title, items in [("Saydown", [("Quit Saydown", "terminate:", "q")]),
                          ("Edit", [("Cut", "cut:", "x"), ("Copy", "copy:", "c"), ("Paste", "paste:", "v"),
                                    ("Select All", "selectAll:", "a")])]:
         menu = AppKit.NSMenu.alloc().initWithTitle_(title)
@@ -668,7 +668,7 @@ def run_window():
         AppKit.NSBackingStoreBuffered, False)
     web = WebKit.WKWebView.alloc().initWithFrame_configuration_(frame, WebKit.WKWebViewConfiguration.alloc().init())
     web.loadRequest_(Foundation.NSURLRequest.requestWithURL_(Foundation.NSURL.URLWithString_(f"http://{HOST}/")))
-    window.setTitle_("open-flow")
+    window.setTitle_("Saydown")
     window.setDelegate_(delegate)
     window.setContentView_(web)
     window.center()
@@ -747,8 +747,8 @@ def make_pill(on_click, on_right_click):
 
 def main():
     def open_window():
-        if os.environ.get("OPEN_FLOW_APP"):  # running inside open-flow.app, which owns the window: ask it to show it
-            return subprocess.Popen(["open", os.environ["OPEN_FLOW_APP"]])
+        if os.environ.get("SAYDOWN_APP"):  # running inside Saydown.app, which owns the window: ask it to show it
+            return subprocess.Popen(["open", os.environ["SAYDOWN_APP"]])
         return subprocess.Popen([sys.executable, __file__, "--window"])
 
     def quit_app():
@@ -761,7 +761,7 @@ def main():
         server = ThreadingHTTPServer(("127.0.0.1", PORT), make_handler(lambda: show.refresh(), quit_app, lambda: take_note(),
                                                                        lambda: recording[0] and note[0]))
     except OSError:
-        print("open-flow is already running; opening its window")
+        print("Saydown is already running; opening its window")
         open_window()
         return
     threading.Thread(target=server.serve_forever, daemon=True).start()

@@ -59,7 +59,7 @@ int main(void) {
         Delegate *delegate = [Delegate new];
         app.delegate = delegate;
         NSMenu *bar = [NSMenu new];
-        add_menu(bar, @"open-flow", @[@[@"Hide open-flow", @"hide:", @"h"], @[@"Quit open-flow", @"terminate:", @"q"]]);
+        add_menu(bar, @"Saydown", @[@[@"Hide Saydown", @"hide:", @"h"], @[@"Quit Saydown", @"terminate:", @"q"]]);
         // the Edit menu is what makes Cmd+C and Cmd+V work inside the page's text fields
         add_menu(bar, @"Edit", @[@[@"Cut", @"cut:", @"x"], @[@"Copy", @"copy:", @"c"], @[@"Paste", @"paste:", @"v"],
                                  @[@"Select All", @"selectAll:", @"a"]]);
@@ -72,7 +72,7 @@ int main(void) {
                       | NSWindowStyleMaskResizable
             backing:NSBackingStoreBuffered defer:NO];
         delegate.window.releasedWhenClosed = NO;  // closing only hides it; the Dock icon brings it back
-        delegate.window.title = @"open-flow";
+        delegate.window.title = @"Saydown";
         delegate.web = [[WKWebView alloc] initWithFrame:frame configuration:[WKWebViewConfiguration new]];
         delegate.window.contentView = delegate.web;
         [delegate.window center];

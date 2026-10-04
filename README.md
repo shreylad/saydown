@@ -1,4 +1,4 @@
-# open-flow
+# Saydown
 
 Hold a key, talk, release. Cleaned-up text is pasted at your cursor, in any app.
 
@@ -46,9 +46,9 @@ macOS will ask the app you launch it from (Terminal, iTerm, ...) for three permi
 ./install-app.sh
 ```
 
-This builds `open-flow.app` in your Applications folder, so you can start it from Launchpad or Spotlight with no terminal. Its window opens with it and it stays in the Dock; opening it again, or clicking its Dock icon, brings the window back. Quit from the Dock, with ⌘Q, or from the Settings tab. Add it under System Settings → General → Login Items to start it when you log in.
+This builds `Saydown.app` in your Applications folder, so you can start it from Launchpad or Spotlight with no terminal. Its window opens with it and it stays in the Dock; opening it again, or clicking its Dock icon, brings the window back. Quit from the Dock, with ⌘Q, or from the Settings tab. Add it under System Settings → General → Login Items to start it when you log in.
 
-The app has its own identity, so macOS asks for Microphone, Accessibility, and Input Monitoring again, this time for open-flow; grant them, quit, and reopen. It is a small launcher tied to this folder and your `uv` install, not a self-contained download: run the script again if you move the folder. It needs Apple's Command Line Tools for the compiler. The log is at `~/Library/Logs/open-flow.log`.
+The app has its own identity, so macOS asks for Microphone, Accessibility, and Input Monitoring again, this time for Saydown; grant them, quit, and reopen. It is a small launcher tied to this folder and your `uv` install, not a self-contained download: run the script again if you move the folder. It needs Apple's Command Line Tools for the compiler. The log is at `~/Library/Logs/saydown.log`.
 
 ## Usage
 
