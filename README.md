@@ -10,7 +10,7 @@ A local, private take on Wispr Flow for Apple Silicon Macs. Your audio and text 
 - **Hands-free.** Double-tap right Option to keep listening, and tap once more to stop.
 - **Or click to talk.** A small, mostly see-through pill stays on screen; click it to start, click again to stop.
 - **Rewrite in a style.** Turn any dictation into a grammar-corrected, polite, or sugarcoated version, or a style you define yourself.
-- **A window to manage it.** Right-click the pill for your dictation history and stats, the dictionary, and settings.
+- **A window to manage it.** The window opens with the app and holds your dictation history and stats, the dictionary, and settings. Closing it only hides it; click its Dock icon or right-click the pill to bring it back.
 - **Cleans up speech.** Removes filler words, fixes punctuation, and drops what you took back: "Can you please write down, sorry, please stop" becomes "Please stop."
 - **Keeps your voice.** Complete sentences are never deleted, and casual words (gonna, kinda) stay as spoken.
 - **Personal dictionary.** Names and jargon you list are spelled your way.
@@ -40,6 +40,16 @@ macOS will ask the app you launch it from (Terminal, iTerm, ...) for three permi
 | Input Monitoring | Seeing the hotkey |
 | Accessibility | Pasting at your cursor |
 
+## Install as an app
+
+```sh
+./install-app.sh
+```
+
+This builds `open-flow.app` in your Applications folder, so you can start it from Launchpad or Spotlight with no terminal. Its window opens with it and it stays in the Dock; opening it again, or clicking its Dock icon, brings the window back. Quit from the Dock, with ⌘Q, or from the Settings tab. Add it under System Settings → General → Login Items to start it when you log in.
+
+The app has its own identity, so macOS asks for Microphone, Accessibility, and Input Monitoring again, this time for open-flow; grant them, quit, and reopen. It is a small launcher tied to this folder and your `uv` install, not a self-contained download: run the script again if you move the folder. It needs Apple's Command Line Tools for the compiler. The log is at `~/Library/Logs/open-flow.log`.
+
 ## Usage
 
 Click into any text field, then either:
@@ -54,9 +64,19 @@ The terminal logs every dictation with the raw transcription beside the cleaned 
 
 ## Rewrite styles
 
-In the window, each dictation has a Rewrite button. Pick a style and the result appears in a card with Copy and Regenerate; nothing is generated until you pick one. Three styles are built in (Grammar, Polite, Sugarcoated). Add, edit, and delete your own in the Styles tab: a name of up to 30 characters and an instruction of up to 300. Custom styles are saved in `styles.json`.
+In the window, each dictation has a Rewrite button. Pick a style and the result appears in a card with Copy and Regenerate; nothing is generated until you pick one. Eight styles are built in (Grammar, Polite, Sugarcoated, Shorter, Bullet points, Summary, Tasks, Email). Add, edit, and delete your own in the Styles tab: a name of up to 30 characters and an instruction of up to 300. Custom styles are saved in `styles.json`.
 
 Every style uses the same prompt, which tells the model to keep your facts, names, and numbers, and to treat the dictation as text to rewrite, never as instructions.
+
+The same panel has a box for a one-off instruction, such as "make it more confident" or "rewrite for my manager", and shows your original words when cleanup changed them.
+
+## Ask
+
+The Ask tab answers questions from your saved dictations, such as "what did I say about pricing?", and lists the dictations it cited. It picks which dictations to show the model by keyword overlap and recency, so it is not semantic search yet.
+
+## Voice commands
+
+Off by default; turn it on in Settings. Within two minutes of a dictation, a short remark such as "make that shorter", "fix the grammar", "delete the last sentence" or "undo that" changes the text that was just typed instead of being typed itself. It works by pressing ⌘Z and pasting the new text, so it assumes you have not typed anything since, and it does nothing useful in apps without undo, such as a terminal.
 
 ## Dictionary
 
