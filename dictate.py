@@ -45,7 +45,11 @@ LANGUAGES = {
 }
 TAP = 0.3  # a press shorter than this (seconds) is a tap, not a hold
 DOUBLE_TAP = 0.6  # two taps within this many seconds start hands-free recording
+QUIET = 0.1  # a recording whose loudest moment is below this is silence; lower it for a very quiet microphone
+SHORT = 6  # a dictation of up to this many words, with no correction in it, is pasted without the cleanup model
+CUES = re.compile(r"\b(um+|uh+|er+|sorry|wait|scratch|mean|actually)\b", re.I)  # fillers and signs of a correction
 WHISPER = "mlx-community/whisper-large-v3-turbo"
+EMBED_MODEL = "embeddinggemma"  # `ollama pull embeddinggemma`; without it Ask falls back to keyword matching
 OLLAMA = "http://localhost:11434"
 RATE = 16000
 PORT = 8737  # the settings window talks to this process over localhost
@@ -57,6 +61,7 @@ DICTIONARY = HERE / "dictionary.txt"  # names/jargon, one per line
 HISTORY = HERE / "history.jsonl"
 SETTINGS = HERE / "settings.json"
 STYLES = HERE / "styles.json"  # rewrite styles you add yourself
+EMBEDDINGS = HERE / "embeddings.npz"  # one vector per saved dictation, so Ask can search by meaning
 DEFAULTS = {
     "model": os.environ.get("DICTATE_MODEL", "gemma4:e4b"),
     "idle_alpha": 0.3,  # how visible the pill is when idle (0 = invisible, 1 = solid)
@@ -104,6 +109,13 @@ BUILTIN_STYLES = {  # id -> (name, instruction)
                        "owner and deadline when they were said. If there are none, write 'No tasks.'"),
     "email": ("Email", "Rewrite it as an email: a subject line, a greeting, short paragraphs, and a sign-off. "
                        "Use [Name] for any recipient or sender name that was not said."),
+    "daily": ("Daily update", "Structure it under three headings: Yesterday, Today, Blockers. Write 'None' under a "
+                              "heading with nothing to report."),
+    "meeting": ("Meeting notes", "Write meeting notes under these headings, leaving out any heading with nothing "
+                                 "under it: Summary, Decisions, Action items (with the owner and deadline when they "
+                                 "were said), Open questions."),
+    "thoughts": ("Thought dump", "Organise it under these headings, leaving out any heading with nothing under it: "
+                                 "Ideas, Tasks, Decisions, Questions, Risks, Next steps. Keep every point."),
 }
 
 # one shared prompt for every rewrite style; only {STYLE_INSTRUCTION} changes
@@ -251,7 +263,17 @@ def term_list():
 
 
 def terms():
-    return ", ".join(term_list())
+    """The spellings to aim for. A line "x ai -> xAI" is a replacement, and only its right side is a spelling."""
+    return ", ".join(line.split("->")[-1].strip() for line in term_list())
+
+
+def respell(text):
+    """Apply the dictionary's "heard -> written" lines. Done in code so it happens every time."""
+    for line in term_list():
+        heard, arrow, written = (part.strip() for part in line.partition("->"))
+        if arrow and heard and written:
+            text = re.sub(rf"(?<!\w){re.escape(heard)}(?!\w)", lambda match: written, text, flags=re.I)
+    return text
 
 
 def read_history():
@@ -339,7 +361,8 @@ def models():
 
 def ollama(system, user, timeout=30, **options):
     body = {
-        "model": settings()["model"], "stream": False, "keep_alive": "30m", "options": options,
+        # the same context size on every call, or Ollama reloads the model each time it changes
+        "model": settings()["model"], "stream": False, "keep_alive": "30m", "options": {"num_ctx": 8192} | options,
         "think": False,  # reasoning adds ~10s per call for no gain here
         "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
     }
@@ -361,12 +384,27 @@ def clean(raw):
     return out if out and len(out) < 2 * len(raw) + 20 else raw
 
 
+def polish(raw):
+    """What to type for a transcript: cleaned by the model unless it is short and plain, then respelled."""
+    plain_enough = len(raw.split()) <= SHORT and not CUES.search(raw)
+    return respell(raw if plain_enough else clean(raw))
+
+
+def macro(raw):
+    """(style id, the rest) when a dictation opens with a style's name, as in "Daily update. Yesterday I..."."""
+    for style in all_styles():
+        match = re.match(rf"{re.escape(style['name'])}[.:]\s+(.+)", raw, re.I | re.S)
+        if match:
+            return style["id"], match.group(1)
+    return None
+
+
 def rewrite(text, style_id):
     """One model call that rewrites text in the given style. Raises if the style is unknown or the call fails."""
     instruction = next(s["instruction"] for s in all_styles() if s["id"] == style_id)
     instruction = instruction.replace("<", "").replace(">", "")  # so a custom style cannot break out of <style>
     out = ollama(REWRITE_PROMPT.replace("{STYLE_INSTRUCTION}", instruction),
-                 f"<transcript>\n{text}\n</transcript>", timeout=60)
+                 f"<transcript>\n{text}\n</transcript>", timeout=120)
     if not out:
         raise OSError("empty reply")
     return out
@@ -399,12 +437,45 @@ def command(said, previous):
     return word if word in ("UNDO", "EDIT") else "TYPE"
 
 
-def relevant(entries, question, budget=6000):
-    """The entries to show the model for a question, oldest first, within a budget of characters."""
-    # ponytail: keyword overlap, then recency, to fit the model's context; use embeddings when history outgrows it
+def embed(texts):
+    vectors = []
+    for start in range(0, len(texts), 32):
+        body = json.dumps({"model": EMBED_MODEL, "input": [t[:1500] or " " for t in texts[start:start + 32]]}).encode()
+        req = urllib.request.Request(OLLAMA + "/api/embed", body, {"Content-Type": "application/json"})
+        vectors += json.load(urllib.request.urlopen(req, timeout=120))["embeddings"]
+    vectors = np.array(vectors, np.float32)
+    return vectors / np.linalg.norm(vectors, axis=1, keepdims=True)
+
+
+def by_keywords(entries, question):
     words = {w for w in re.findall(r"\w+", question.lower()) if len(w) > 3}
-    ranked = sorted(entries, reverse=True,
-                    key=lambda e: (len(words & set(re.findall(r"\w+", e["text"].lower()))), e["ts"]))
+    return sorted(entries, reverse=True,
+                  key=lambda e: (len(words & set(re.findall(r"\w+", e["text"].lower()))), e["ts"]))
+
+
+def by_meaning(entries, question, cache=EMBEDDINGS):
+    """Entries ranked by how close their meaning is to the question, or None if the embedding model is missing."""
+    try:
+        known = {}
+        if cache and cache.exists():
+            with np.load(cache) as saved:
+                known = dict(zip(saved["ts"].tolist(), saved["vectors"]))
+        missing = [e for e in entries if e["ts"] not in known]
+        if missing:
+            known.update(zip((e["ts"] for e in missing), embed([e["text"] for e in missing])))
+            if cache:  # ponytail: rewritten whole after new dictations; fine until tens of thousands of entries
+                np.savez(cache, ts=np.array(list(known)), vectors=np.array(list(known.values())))
+        asked = embed([question])[0]
+        return sorted(entries, key=lambda e: float(known[e["ts"]] @ asked), reverse=True)
+    except Exception as e:
+        print("searching by meaning failed, matching keywords instead:", e)
+        return None
+
+
+def relevant(entries, question, budget=6000, rank=by_keywords):
+    """The entries to show the model for a question, oldest first, within a budget of characters."""
+    # ponytail: ranked by closeness to the question only, so "what did I say yesterday" is not found by date
+    ranked = rank(entries, question) or by_keywords(entries, question)
     picked, used = [], 0
     for entry in ranked:
         used += min(len(entry["text"]), 1500)
@@ -414,11 +485,12 @@ def relevant(entries, question, budget=6000):
     return sorted(picked, key=lambda e: e["ts"])
 
 
-def ask(question, entries):
+def ask(question, entries, rank=by_meaning):
     """Answer a question from the saved dictations. Returns the answer and the numbered entries it was shown."""
     if not entries:
         return {"answer": "You have no saved dictations yet.", "sources": []}
-    sources = [{"n": n, "ts": e["ts"], "text": e["text"]} for n, e in enumerate(relevant(entries, question), 1)]
+    sources = [{"n": n, "ts": e["ts"], "text": e["text"]}
+               for n, e in enumerate(relevant(entries, question, rank=rank), 1)]
     listing = "\n".join(f"[{s['n']}] {datetime.datetime.fromtimestamp(s['ts']):%A %Y-%m-%d %H:%M}: {s['text'][:1500]}"
                         for s in sources)
     answer = ollama(f"{ASK_PROMPT}\n\nToday is {datetime.date.today():%A %Y-%m-%d}.",
@@ -444,7 +516,7 @@ def paste(text):
 
 # ---- settings page server ----------------------------------------------------------------------------------
 
-def make_handler(on_settings_change, on_quit):
+def make_handler(on_settings_change, on_quit, on_note, taking_note):
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):
             if os.environ.get("DICTATE_DEBUG"):
@@ -473,7 +545,7 @@ def make_handler(on_settings_change, on_quit):
                 return self.reply({"history": entries[-300:][::-1], "stats": stats(entries),
                                    "dictionary": term_list(), "settings": settings() | {"hotkey": hotkey()},
                                    "models": models(), "microphones": microphones(), "languages": LANGUAGES,
-                                   "styles": all_styles(), "needs_access": not access["ok"],
+                                   "styles": all_styles(), "needs_access": not access["ok"], "note": taking_note(),
                                    "capturing": time.time() < capture["until"], "capture_error": capture["error"]})
             self.reply({"error": "not found"}, status=404)
 
@@ -502,7 +574,8 @@ def make_handler(on_settings_change, on_quit):
                         answer = lambda: ask(question, read_history())
                     else:
                         text = body["text"]
-                        if not isinstance(text, str) or not text.strip() or len(text) > 20000:
+                        # ponytail: about 30 minutes of speech fits the model's context; summarise in parts past that
+                        if not isinstance(text, str) or not text.strip() or len(text) > 40000:
                             raise ValueError("bad text")
                         if "instruction" in body:  # free text instead of a saved style
                             instruction = plain(body["instruction"], 300)
@@ -529,8 +602,11 @@ def make_handler(on_settings_change, on_quit):
                     save_styles(styles)
                 elif self.path == "/api/styles/delete":
                     save_styles([s for s in custom_styles() if s["id"] != body["id"]])
+                elif self.path == "/api/note":  # start, or stop and save, a recording that is kept instead of typed
+                    on_note()
                 elif self.path == "/api/history/clear":
                     HISTORY.unlink(missing_ok=True)
+                    EMBEDDINGS.unlink(missing_ok=True)
                 elif self.path == "/api/copy":
                     if not isinstance(body["text"], str):
                         raise ValueError("bad text")
@@ -682,7 +758,8 @@ def main():
 
     settings_window = [None]
     try:  # the port doubles as the single-instance lock
-        server = ThreadingHTTPServer(("127.0.0.1", PORT), make_handler(lambda: show.refresh(), quit_app))
+        server = ThreadingHTTPServer(("127.0.0.1", PORT), make_handler(lambda: show.refresh(), quit_app, lambda: take_note(),
+                                                                       lambda: recording[0] and note[0]))
     except OSError:
         print("open-flow is already running; opening its window")
         open_window()
@@ -727,11 +804,12 @@ def main():
     recorder = [spawn()]
     lock = threading.Lock()
     recording = [False]
+    note = [False]  # the current recording is a note: saved to history, not typed
     hands_free = [False]  # True when recording runs until the next click or tap, with no key held
     pressed_at, last_tap = [0.0], [0.0]
     last_paste = [None]  # {"text", "at", "before"}: what a voice command would change; "before" is the text it replaced
 
-    def start(by_click):
+    def start(by_click, as_note=False):
         with lock:
             if not recording[0]:
                 try:
@@ -741,7 +819,7 @@ def main():
                     print("the recorder had stopped; started a new one, try again")
                     recorder[0] = spawn()
                     return
-                hands_free[0] = by_click
+                hands_free[0], note[0] = by_click, as_note
                 recording[0] = True
                 show("\U0001F534 Click to stop" if by_click else "\U0001F534 Listening")
                 print("recording...")
@@ -755,7 +833,10 @@ def main():
                 process.wait()
                 recorder[0] = spawn()
                 show("Writing…")
-                jobs.put(path)
+                jobs.put((path, note[0]))
+
+    def take_note():
+        stop() if recording[0] else start(by_click=True, as_note=True)
 
     def toggle():
         stop() if recording[0] else start(by_click=True)
@@ -870,11 +951,14 @@ def main():
             return True  # key-up events for ordinary keys are reliable; only modifier releases go missing
         return Quartz.CGEventSourceFlagsState(Quartz.kCGEventSourceStateCombinedSessionState) & MOD_KEYS[key["keycode"]][0]
 
-    def dictate(path):
+    def dictate(path, as_note):
         audio = np.fromfile(path, np.float32)
         os.unlink(path)  # the audio is never kept
         if len(audio) < RATE * TAP:  # accidental tap; Whisper invents text from silence
             print(f"skipped: only {len(audio) / RATE:.1f}s recorded")
+            return
+        if np.abs(audio).max() < QUIET:  # Whisper writes paragraphs of invented text for near-silence
+            print(f"skipped: too quiet to be speech (peak level {np.abs(audio).max():.2f})")
             return
         print(f"transcribing {len(audio) / RATE:.1f}s (peak level {np.abs(audio).max():.2f})...")
         start = time.time()
@@ -883,9 +967,13 @@ def main():
                                         language=None if language == "auto" else language)
         raw = result["text"].strip()
         # Whisper invents words from silence; it also reports how sure it is that nobody spoke
-        if not raw or all(seg["no_speech_prob"] > 0.6 for seg in result["segments"]):
+        invented = len(raw.split()) > 6 * len(audio) / RATE + 3  # nobody speaks six words a second
+        if not raw or invented or all(seg["no_speech_prob"] > 0.6 for seg in result["segments"]):
             print("skipped: no speech heard")
             return
+        if as_note:  # ponytail: one voice, no speaker labels; needs a diarisation model to tell people apart
+            print(f"[{time.time() - start:.1f}s] note saved: {len(raw.split())} words")
+            return remember(respell(raw), raw, len(audio) / RATE, kind="note")
         last = last_paste[0]
         # only a short remark soon after a dictation can be a command, so normal dictations pay nothing for this
         if settings()["voice_commands"] and last and time.time() - last["at"] < 120 and len(raw.split()) <= 12:
@@ -904,17 +992,24 @@ def main():
                 if kind == "EDIT":
                     remember(new, last["text"], len(audio) / RATE)
                 return
-        text = clean(raw)
+        text, styled = None, settings()["voice_commands"] and macro(raw)
+        if styled:
+            try:
+                text = respell(rewrite(styled[1], styled[0]))
+            except OSError as e:
+                print("style failed, typing it as usual:", e)
+        text = text or polish(raw)
         paste(text + " ")  # trailing space so back-to-back dictations don't run together
         last_paste[0] = {"text": text, "at": time.time(), "before": None}
         print(f"[{time.time() - start:.1f}s] raw:   {raw}\n        clean: {text}")
         remember(text, raw, len(audio) / RATE)
 
-    def remember(text, raw, audio_s):
-        if settings()["save_history"]:
+    def remember(text, raw, audio_s, **extra):
+        if settings()["save_history"] or extra:  # a note exists only in history, so it is always saved
             # ponytail: the file grows forever and is re-read whole; rotate or use SQLite past ~10k entries
             with HISTORY.open("a") as f:
-                f.write(json.dumps({"ts": time.time(), "text": text, "raw": raw, "audio_s": round(audio_s, 1)}) + "\n")
+                f.write(json.dumps({"ts": time.time(), "text": text, "raw": raw, "audio_s": round(audio_s, 1)}
+                                   | extra) + "\n")
 
     def worker():  # models are loaded and used on this one thread; the main thread belongs to AppKit
         print("loading models...")
@@ -926,7 +1021,7 @@ def main():
         print("       right-click the pill for history, dictionary and settings; Ctrl+C to quit")
         while True:
             try:
-                recorded = jobs.get(timeout=0.2)
+                job = jobs.get(timeout=0.2)
             except queue.Empty:
                 # macOS sometimes never delivers the key-up event, which left the recording running forever
                 if recording[0] and not hands_free[0] and not key_is_down() and time.time() - pressed_at[0] > 1:
@@ -934,7 +1029,7 @@ def main():
                     stop()
                 continue
             try:
-                dictate(recorded)
+                dictate(*job)
             except Exception:
                 traceback.print_exc()
             if jobs.empty() and not recording[0]:
@@ -1004,7 +1099,22 @@ if __name__ == "__main__":
                {"ts": noon(2), "text": "Remind me to call the dentist."}]
         assert [e["ts"] for e in relevant(old, "what did I say about pricing")] == [noon(1), noon(2)]
         assert relevant(old * 40, "pricing", budget=100)[0]["text"].startswith("Pricing")
-        reply = ask("Which pricing plan did I pick?", old)
+        assert polish("Thanks, see you tomorrow.") == "Thanks, see you tomorrow."  # short and plain: no model call
+        assert "Tuesday" not in polish("Tuesday, no wait, Wednesday works.")  # short, but a correction: cleaned
+        DICTIONARY_BACKUP = DICTIONARY.read_text() if DICTIONARY.exists() else None
+        try:
+            DICTIONARY.write_text("Siobhan\nx ai -> xAI\n")
+            assert terms() == "Siobhan, xAI" and respell("I work at X AI, not at Maxai.") == "I work at xAI, not at Maxai."
+        finally:
+            DICTIONARY.write_text(DICTIONARY_BACKUP) if DICTIONARY_BACKUP is not None else DICTIONARY.unlink()
+        assert macro("Daily update. Yesterday I shipped the fix.") == ("daily", "Yesterday I shipped the fix.")
+        assert macro("Email me when the daily update is ready.") is None
+        print("ok: short dictations, respelling and style triggers")
+        ranked = by_meaning(old + [{"ts": noon(3), "text": "The cat sat on the mat."}], "how much will we charge", cache=None)
+        if ranked:  # needs the embedding model
+            assert ranked[0]["text"].startswith("Pricing"), ranked
+            print("ok: search by meaning")
+        reply = ask("Which pricing plan did I pick?", old, rank=lambda e, q: by_meaning(e, q, cache=None))
         assert "freemium" in reply["answer"].lower() and "[1]" in reply["answer"], reply["answer"]
         print(f"ok ask: {reply['answer']}")
 

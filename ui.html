@@ -44,6 +44,8 @@
   .row + .row { border-top: 1px solid var(--line); }
   .row time { color: var(--muted); font-size: 13px; padding-top: 2px; font-variant-numeric: tabular-nums; }
   .row p { margin: 0; overflow-wrap: anywhere; }
+  .row p.long { max-height: 9em; overflow: auto; }
+  .note-bar { display: flex; gap: 12px; align-items: center; margin-bottom: 22px; }
   .empty { padding: 26px 18px; color: var(--muted); }
   .banner { background: #fff4d6; border: 1px solid #e2c56a; border-radius: 12px; padding: 12px 16px; margin-bottom: 22px; }
   .actions { display: flex; gap: 6px; align-items: center; }
@@ -126,6 +128,10 @@
       <div class="tile"><b id="wpm">0</b><span>words per minute</span></div>
       <div class="tile"><b id="streak">0</b><span>day streak</span></div>
     </div>
+    <div class="note-bar">
+      <button class="btn primary" id="note" type="button">Record a note</button>
+      <span class="muted">For meetings and thinking out loud: saved here, not typed anywhere.</span>
+    </div>
     <div id="history"></div>
     <div class="toolbar"><button class="btn danger" id="clear">Clear history</button></div>
   </section>
@@ -142,9 +148,9 @@
 
   <section id="dictionary" hidden>
     <h1>Dictionary</h1>
-    <p class="lead">Names and jargon you add here are spelled your way.</p>
+    <p class="lead">Names and jargon you add here are spelled your way. To always replace one thing with another, write it as <kbd>x ai -&gt; xAI</kbd>.</p>
     <form class="add" id="add-term">
-      <input type="text" id="new-term" maxlength="80" placeholder="Add a name or term" aria-label="New dictionary term" autocomplete="off">
+      <input type="text" id="new-term" maxlength="80" placeholder="Add a name or term, or: x ai -> xAI" aria-label="New dictionary term" autocomplete="off">
       <button class="btn primary" type="submit">Add</button>
     </form>
     <div class="card" id="terms"></div>
@@ -203,7 +209,7 @@
       </label>
       <label class="field">
         <span>Voice commands</span>
-        <small>Right after a dictation, say “make that shorter”, “fix the grammar” or “undo that” to change what was just typed. It presses ⌘Z in the app you are typing in, so it is off until you turn it on.</small>
+        <small>Right after a dictation, say “make that shorter”, “fix the grammar” or “undo that” to change what was just typed. It presses ⌘Z in the app you are typing in, so it is off until you turn it on. It also lets you open with a style name, as in “Daily update. Yesterday I…”, to get the rest typed in that style.</small>
         <span class="control"><input type="checkbox" id="voice-commands"></span>
       </label>
     </div>
@@ -380,8 +386,9 @@ function renderHistory() {
     const toggle = el("button", "btn", "Rewrite");
     toggle.setAttribute("aria-expanded", open.has(entry.ts));
     toggle.onclick = () => { if (!open.delete(entry.ts)) open.add(entry.ts); renderHistory(); };
+    if (entry.kind === "note") actions.append(el("span", "tag", "Note"));
     actions.append(toggle, copyButton(entry.text));
-    row.append(el("time", "", date.toLocaleTimeString(undefined, {hour: "numeric", minute: "2-digit"})), el("p", "", entry.text), actions);
+    row.append(el("time", "", date.toLocaleTimeString(undefined, {hour: "numeric", minute: "2-digit"})), el("p", entry.kind === "note" ? "long" : "", entry.text), actions);
     if (open.has(entry.ts)) row.append(rewritePanel(entry));
     card.append(row);
   }
@@ -472,6 +479,7 @@ function renderSettings() {
 let quitting = false;
 function render() {  // rebuild a list only when its data changed, so open panels and half-typed forms are left alone
   $("#access").hidden = !state.needs_access;
+  $("#note").textContent = state.note ? "Stop and save note" : "Record a note";
   if (changed("history", [state.history, state.stats, state.styles])) renderHistory();
   if (changed("dictionary", state.dictionary)) renderDictionary();
   if (changed("styles", state.styles)) renderStyles();
@@ -502,6 +510,7 @@ $("#alpha").oninput = (event) => $("#alpha-value").textContent = "(" + event.tar
 $("#alpha").onchange = (event) => post("/api/settings", {idle_alpha: event.target.value / 100});
 $("#save-history").onchange = (event) => post("/api/settings", {save_history: event.target.checked});
 $("#voice-commands").onchange = (event) => post("/api/settings", {voice_commands: event.target.checked});
+$("#note").onclick = () => post("/api/note");
 $("#ask-form").onsubmit = async (event) => {
   event.preventDefault();
   const question = $("#question").value.trim(), card = el("div", "result");

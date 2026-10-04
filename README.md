@@ -64,7 +64,7 @@ The terminal logs every dictation with the raw transcription beside the cleaned 
 
 ## Rewrite styles
 
-In the window, each dictation has a Rewrite button. Pick a style and the result appears in a card with Copy and Regenerate; nothing is generated until you pick one. Eight styles are built in (Grammar, Polite, Sugarcoated, Shorter, Bullet points, Summary, Tasks, Email). Add, edit, and delete your own in the Styles tab: a name of up to 30 characters and an instruction of up to 300. Custom styles are saved in `styles.json`.
+In the window, each dictation has a Rewrite button. Pick a style and the result appears in a card with Copy and Regenerate; nothing is generated until you pick one. Eleven styles are built in (Grammar, Polite, Sugarcoated, Shorter, Bullet points, Summary, Tasks, Email, Daily update, Meeting notes, Thought dump). Add, edit, and delete your own in the Styles tab: a name of up to 30 characters and an instruction of up to 300. Custom styles are saved in `styles.json`.
 
 Every style uses the same prompt, which tells the model to keep your facts, names, and numbers, and to treat the dictation as text to rewrite, never as instructions.
 
@@ -72,11 +72,19 @@ The same panel has a box for a one-off instruction, such as "make it more confid
 
 ## Ask
 
-The Ask tab answers questions from your saved dictations, such as "what did I say about pricing?", and lists the dictations it cited. It picks which dictations to show the model by keyword overlap and recency, so it is not semantic search yet.
+The Ask tab answers questions from your saved dictations, such as "what did I say about pricing?", and lists the dictations it cited. It finds the dictations closest in meaning to your question, so "how much will we charge" finds what you said about pricing. This needs one extra model, `ollama pull embeddinggemma`; without it Ask matches keywords instead. Questions about a time, such as "what did I say yesterday", are not found by date.
+
+## Notes
+
+Record a note, in the window, records without typing anything: stop it from the same button, the pill, or your shortcut, and the transcript is saved in the list. Use it for meetings and thinking out loud, then open Rewrite and pick Meeting notes, Thought dump, Tasks or Summary. A note is one voice with no speaker labels, and the styles see about 30 minutes of speech at most.
+
+Dictations of up to six words with no filler or correction in them are typed straight from Whisper, without the cleanup model, which makes them faster.
 
 ## Voice commands
 
-Off by default; turn it on in Settings. Within two minutes of a dictation, a short remark such as "make that shorter", "fix the grammar", "delete the last sentence" or "undo that" changes the text that was just typed instead of being typed itself. An edit has to point at the text with "that", "this", "it", or a part of it such as "the last sentence"; anything else, and any question, is typed as usual. It works by pressing ⌘Z and pasting the new text, so it assumes you have not typed anything since, and it does nothing useful in apps without undo, such as a terminal.
+Off by default; turn it on in Settings. Within two minutes of a dictation, a short remark such as "make that shorter", "fix the grammar", "delete the last sentence" or "undo that" changes the text that was just typed instead of being typed itself. An edit has to point at the text with "that", "this", "it", or a part of it such as "the last sentence"; anything else, and any question, is typed as usual.
+
+With voice commands on, opening with a style name types the rest in that style: "Daily update. Yesterday I fixed the login bug, today I am on billing, no blockers." It works by pressing ⌘Z and pasting the new text, so it assumes you have not typed anything since, and it does nothing useful in apps without undo, such as a terminal.
 
 ## Dictionary
 
@@ -89,6 +97,12 @@ Kubernetes
 ```
 
 The terms are given to Whisper as spelling hints and to the cleanup model as corrections for misheard words. The file is read on every dictation, so edits apply without a restart. It is git-ignored because it is personal.
+
+A line written as `heard -> written` always replaces one with the other, whatever the model does:
+
+```
+x ai -> xAI
+```
 
 ## Configuration
 
