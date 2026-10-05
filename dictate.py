@@ -1010,6 +1010,12 @@ def main():
     access.update(ok=bool(listen and post), listen=bool(listen), post=bool(post))
     if not access["ok"]:
         print("waiting for Accessibility and Input Monitoring permission; grant both, then relaunch")
+        if os.environ.get("SAYDOWN_APP"):  # from a terminal the grant belongs to the terminal, not to this app
+            # macOS ties a grant to the exact build of an unsigned app. After an update the switch in System Settings
+            # still shows on but does nothing, and toggling it does not help, so drop it and ask for a fresh one.
+            for missing, service in [(not listen, "ListenEvent"), (not post, "Accessibility")]:
+                if missing:
+                    subprocess.run(["tccutil", "reset", service, "io.github.saydown"])
         Quartz.CGRequestListenEventAccess()
         Quartz.CGRequestPostEventAccess()
 
