@@ -5,12 +5,12 @@
 #     "pyobjc-framework-Cocoa", "pyobjc-framework-Quartz", "pyobjc-framework-WebKit",
 # ]
 # ///
-"""Hold right Option, talk, release: cleaned-up text is pasted at your cursor. Fully local.
+"""Hold right Option, talk, release: local dictation with optional paid OpenAI speech.
 
 Run:  uv run dictate.py          (the first run downloads the models)
 Test: uv run dictate.py --test   (checks the cleanup step and the settings logic)
 """
-import ctypes, datetime, difflib, json, math, os, queue, random, re, shutil, subprocess, sys, tempfile, threading, time, traceback, urllib.request, uuid
+import ctypes, datetime, difflib, io, json, math, os, queue, random, re, shutil, ssl, subprocess, sys, tempfile, threading, time, traceback, urllib.request, uuid, wave
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -53,14 +53,45 @@ QUIET = 0.1  # a recording whose loudest moment is below this is silence; lower 
 # Signs that the speaker corrected themselves. Only then is the cleanup model worth its second or so; everything
 # else is tidied by the rules in tidy(), which is how the faster dictation apps do it.
 CUES = re.compile(r"\b(sorry|wait|scratch|i mean|actually|rather|rephrase|correction|start over|no,? no)\b", re.I)
+# Only complete, unambiguous courtesy sentences bypass the correction model.
+COURTESY = re.compile(r"(?:^|(?<=[.!?]))\s*sorry(?:,\s*|\s+)(?:i(?:['’]m| am) late|for (?:the )?delay)[.!?](?=\s|$)", re.I)
+# What a voice command must contain: a word that takes text back, or one that points at the text just typed. A short
+# remark without either is typed with no model call, which is most of them.
+COMMANDISH = re.compile(r"\b(undo|scratch|delete|remove|erase|cancel|never ?mind|take\b.*\bback|that|this|it|sentence|"
+                        r"paragraph|grammar|spelling|punctuation)\b", re.I)
+EDIT_INTENT = re.compile(r"\b(undo|scratch|delete|remove|erase|cancel|never ?mind|take\b.*\bback|make|fix|correct|"
+                         r"change|rewrite|rephrase|shorten|expand|summari[sz]e|translate|turn|convert|add|replace|"
+                         r"format|simplify|capitali[sz]e|lowercase|uppercase|punctuate|split|join|shorter|longer|"
+                         r"formal|casual|polite|concise|too|grammar|spelling|punctuation|bullets?)\b", re.I)
 FILLERS = re.compile(r"\b(?:u+h*m+|u+h+|e+r+m*|h+m+|m{2,})\b[,…]*\s*", re.I)  # um, uh, uhm, er, erm, hmm, mm
 STUTTER = re.compile(r"\b(\w+)(?:,?\s+\1\b){2,}|\b(I)(?:,?\s+I\b)+", re.I)  # "the the the", "I I"
 WHISPER = "mlx-community/whisper-large-v3-turbo"
-# The text models offered in Settings, as Hugging Face repositories, best first. Score a candidate with bench.py
-# before adding it: the 5-bit build passes all 42 checks, the 4-bit one misses two.
+# The one text model, as a Hugging Face repository; there is no choice in Settings. Score a candidate with bench.py
+# before changing it: the 5-bit build passes all 42 checks, the 4-bit one misses two.
+SPEECH_MODELS = {
+    "gpt-transcribe": "GPT Transcribe (recommended)",
+    "gpt-4o-mini-transcribe": "GPT-4o Mini Transcribe (legacy)",
+    "gpt-4o-transcribe": "GPT-4o Transcribe (legacy)",
+    "whisper-1": "Whisper API (legacy)",
+}
+OPENROUTER_MODELS = {
+    "openai/whisper-large-v3-turbo": "Whisper Large V3 Turbo",
+    "openai/whisper-large-v3": "Whisper Large V3",
+    "openai/gpt-transcribe": "GPT Transcribe",
+    "openai/gpt-4o-mini-transcribe": "GPT-4o Mini Transcribe",
+    "openai/gpt-4o-transcribe": "GPT-4o Transcribe",
+}
+SPEECH_CATALOG = {"openai": SPEECH_MODELS, "openrouter": OPENROUTER_MODELS}
+KEYCHAIN = "saydown-openai"
+KEYCHAINS = {"openai": KEYCHAIN, "openrouter": "saydown-openrouter"}
+SPEECH_ENDPOINTS = {"openai": "https://api.openai.com/v1/audio/transcriptions",
+                    "openrouter": "https://openrouter.ai/api/v1/audio/transcriptions"}
+speech_status = {"engine": "", "message": ""}
+_key_status = {provider: [0.0, False] for provider in KEYCHAINS}
+_key_cache = {}  # secrets stay in process memory; None means access was denied this session
+_key_lock = threading.RLock()
 MODELS = {
-    "mlx-community/gemma-4-e4b-it-5bit": "Gemma 4 E4B (5.7 GB, recommended)",
-    "mlx-community/gemma-4-e4b-it-4bit": "Gemma 4 E4B, smaller (4.8 GB, misses some corrections)",
+    "mlx-community/gemma-4-e4b-it-5bit": "Gemma 4 E4B (5.7 GB)",
 }
 EMBED_MODEL = "mlx-community/embeddinggemma-300m-4bit"  # 0.2 GB; without it Ask falls back to keyword matching
 IDLE = 1800  # seconds unused before the text model, about 5 GB of memory, is dropped; loading it again takes ~3s
@@ -85,12 +116,15 @@ for _file in (DICTIONARY, HISTORY, SETTINGS, STYLES, EMBEDDINGS):  # data used t
     if (HERE / _file.name).exists() and not _file.exists():
         shutil.move(HERE / _file.name, _file)
 DEFAULTS = {
-    "model": os.environ.get("DICTATE_MODEL", next(iter(MODELS))),
+    "model": next(iter(MODELS)),
     "idle_alpha": 0.3,  # how visible the pill is when idle (0 = invisible, 1 = solid)
     "save_history": True,
     "hotkey": DEFAULT_HOTKEY,
     "microphone": "",  # an input device name, or "" for the system default
     "language": "auto",
+    "speech_provider": "local",
+    "speech_model": "gpt-transcribe",
+    "openrouter_model": "openai/whisper-large-v3-turbo",
     "voice_commands": False,  # "make that shorter" / "undo that" right after a dictation edits it in place
 }
 
@@ -245,9 +279,19 @@ def settings():
     try:
         mtime = SETTINGS.stat().st_mtime
         if _cached[0] != mtime:
-            saved = DEFAULTS | json.loads(SETTINGS.read_text())
+            stored = json.loads(SETTINGS.read_text())
+            saved = DEFAULTS | stored
+            # Preserve the earlier key-only opt-in until the user explicitly selects a provider.
+            if "speech_provider" not in stored and cloud_key_saved():
+                saved.update(speech_provider="openai", speech_model="gpt-4o-mini-transcribe")
             if saved["model"] not in MODELS:  # a name from when Ollama ran the models
                 saved["model"] = DEFAULTS["model"]
+            if saved["speech_provider"] not in ("local", "openai", "openrouter"):
+                saved["speech_provider"] = "local"
+            if saved["speech_model"] not in SPEECH_MODELS:
+                saved["speech_model"] = DEFAULTS["speech_model"]
+            if saved["openrouter_model"] not in OPENROUTER_MODELS:
+                saved["openrouter_model"] = DEFAULTS["openrouter_model"]
             _cached[:] = [mtime, saved]
         return _cached[1]
     except (OSError, ValueError, TypeError):
@@ -344,9 +388,11 @@ def valid_settings(body):
     for key in ("save_history", "voice_commands"):
         if key in body:
             new[key] = body[key] is True
-    for key, choices in (("language", LANGUAGES), ("microphone", ["", *microphones()])):
+    for key, choices in (("language", LANGUAGES), ("microphone", ["", *microphones()]),
+                         ("speech_provider", ("local", "openai", "openrouter")),
+                         ("speech_model", SPEECH_MODELS), ("openrouter_model", OPENROUTER_MODELS)):
         if key in body:
-            if body[key] not in choices:
+            if not isinstance(body[key], str) or body[key] not in choices:
                 raise ValueError(f"bad {key}")
             new[key] = body[key]
     return new
@@ -477,6 +523,175 @@ def llm(system, user, max_tokens=2048, temperature=1.0):
         return mlx_lm.generate(model, tokenizer, prompt=prompt, max_tokens=max_tokens, sampler=sampler).strip()
 
 
+def keychain_lookup(provider, read_secret=False):
+    """Read in the same process that saved the item; never delegate secret access to `security`."""
+    security = ctypes.CDLL("/System/Library/Frameworks/Security.framework/Security")
+    ptr, size = ctypes.c_void_p, ctypes.c_uint32
+    find = security.SecKeychainFindGenericPassword
+    find.argtypes = [ptr, size, ctypes.c_char_p, size, ctypes.c_char_p,
+                     ctypes.POINTER(size), ctypes.POINTER(ptr), ptr]
+    find.restype = ctypes.c_int32
+    free = security.SecKeychainItemFreeContent
+    free.argtypes = [ptr, ptr]
+    free.restype = ctypes.c_int32
+    service, length, data = KEYCHAINS[provider].encode(), size(), ptr()
+    try:
+        result = find(None, len(service), service, 0, None,
+                      ctypes.byref(length) if read_secret else None,
+                      ctypes.byref(data) if read_secret else None, None)
+        if result == -25300:  # errSecItemNotFound
+            return "" if read_secret else False
+        if result:
+            raise PermissionError("Keychain access was denied. Save your API key again in Settings or restart Saydown to retry.")
+        return ctypes.string_at(data, length.value).decode("utf-8").strip() if read_secret else True
+    finally:
+        if data.value:
+            free(None, data)
+
+
+def cloud_key(provider="openai"):
+    """Read a provider's secret once per app session. Saving/removing a key refreshes this cache."""
+    with _key_lock:
+        if provider not in _key_cache:
+            try:
+                _key_cache[provider] = keychain_lookup(provider, read_secret=True)
+            except PermissionError:
+                _key_cache[provider] = None
+        key = _key_cache[provider]
+        if key is None:
+            raise PermissionError("Keychain access was denied. Save your API key again in Settings or restart Saydown to retry.")
+        return key
+
+
+def cloud_key_saved(provider="openai"):
+    """Check metadata only; polling Settings must never read or expose the secret."""
+    cached = _key_status[provider]
+    if time.monotonic() - cached[0] > 10:
+        try:
+            found = keychain_lookup(provider)
+        except OSError:
+            found = False
+        cached[:] = [time.monotonic(), found]
+    return cached[1]
+
+
+def save_cloud_key(key, provider="openai"):
+    """Update Keychain and the session cache together so the next dictation does not prompt again."""
+    with _key_lock:
+        _write_cloud_key(key, provider)
+        _key_cache[provider] = key
+        speech_status.update(engine="", message="")
+
+
+def _write_cloud_key(key, provider="openai"):
+    """Store through Security.framework so a secret never appears in process arguments or a file."""
+    if not isinstance(key, str) or (key and not re.fullmatch(r"[!-~]{16,512}", key)):
+        raise ValueError("Enter an API key without spaces.")
+    if provider not in KEYCHAINS:
+        raise ValueError("Unknown speech provider")
+    security = ctypes.CDLL("/System/Library/Frameworks/Security.framework/Security")
+    core = ctypes.CDLL("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation")
+    ptr, size = ctypes.c_void_p, ctypes.c_uint32
+    find = security.SecKeychainFindGenericPassword
+    find.argtypes = [ptr, size, ctypes.c_char_p, size, ctypes.c_char_p, ptr, ptr, ctypes.POINTER(ptr)]
+    find.restype = ctypes.c_int32
+    add = security.SecKeychainAddGenericPassword
+    add.argtypes = [ptr, size, ctypes.c_char_p, size, ctypes.c_char_p, size, ctypes.c_char_p, ptr]
+    add.restype = ctypes.c_int32
+    update = security.SecKeychainItemModifyAttributesAndData
+    update.argtypes = [ptr, ptr, size, ctypes.c_char_p]
+    update.restype = ctypes.c_int32
+    delete = security.SecKeychainItemDelete
+    delete.argtypes = [ptr]
+    delete.restype = ctypes.c_int32
+    core.CFRelease.argtypes = [ptr]
+    core.CFRelease.restype = None
+    service, account, item = KEYCHAINS[provider].encode(), provider.encode(), ptr()
+    result = find(None, len(service), service, 0, None, None, None, ctypes.byref(item))
+    if result not in (0, -25300):  # errSecItemNotFound
+        raise OSError("Keychain access was denied. Unlock your login Keychain and try again.")
+    try:
+        if key:
+            secret = key.encode()
+            result = (update(item, None, len(secret), secret) if item.value else
+                      add(None, len(service), service, len(account), account, len(secret), secret, None))
+        elif item.value:
+            result = delete(item)
+        else:
+            result = 0
+    finally:
+        if item.value:
+            core.CFRelease(item)
+    if result:
+        raise OSError("Couldn’t update the login Keychain. Check macOS permission prompts and try again.")
+    _key_status[provider][:] = [time.monotonic(), bool(key)]
+    _cached[:] = [None, None]
+
+
+def hear(audio, key, language=None, prompt=None, model="gpt-transcribe", provider="openai"):
+    """The words in the audio, from the selected API. Raises so the caller can fall back to Whisper."""
+    import certifi  # the bundled Python has no certificate store of its own
+    if provider not in SPEECH_CATALOG or model not in SPEECH_CATALOG[provider]:
+        raise ValueError("Unsupported speech model")
+    if len(audio) * 2 + 44 > 24_000_000:
+        raise ValueError("This recording is too large for a single API upload")
+    wav = io.BytesIO()
+    with wave.open(wav, "wb") as f:
+        f.setnchannels(1)
+        f.setsampwidth(2)
+        f.setframerate(RATE)
+        f.writeframes((audio / max(1.0, np.abs(audio).max()) * 32767).astype("<i2").tobytes())  # some mics exceed 1.0
+    edge = uuid.uuid4().hex
+    fields = {"model": model, "response_format": "json"}
+    if language:
+        fields["languages[]" if provider == "openai" and model == "gpt-transcribe" else "language"] = language
+    if prompt:
+        fields["prompt"] = prompt[:1000]
+    body = b"".join(f'--{edge}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n{value}\r\n'.encode()
+                    for name, value in fields.items())
+    body += (f'--{edge}\r\nContent-Disposition: form-data; name="file"; filename="speech.wav"\r\n'
+             "Content-Type: audio/wav\r\n\r\n").encode() + wav.getvalue() + f"\r\n--{edge}--\r\n".encode()
+    request = urllib.request.Request(SPEECH_ENDPOINTS[provider], body, {
+        "Authorization": f"Bearer {key}", "Content-Type": f"multipart/form-data; boundary={edge}"})
+    # ponytail: one whole-clip request; stream the audio while speaking if long dictations feel slow
+    with urllib.request.urlopen(request, timeout=30, context=ssl.create_default_context(cafile=certifi.where())) as reply:
+        text = json.load(reply).get("text")
+        if not isinstance(text, str):
+            raise ValueError("The speech API returned an invalid transcript")
+        return text
+
+
+def transcribe(audio, language, local):
+    """Use the selected service and always preserve the local fallback."""
+    selected = settings()
+    speech_status.update(engine="local", message="Using Whisper on this Mac.")
+    provider = selected["speech_provider"]
+    if provider in SPEECH_CATALOG:
+        model = selected["openrouter_model" if provider == "openrouter" else "speech_model"]
+        label = "OpenRouter" if provider == "openrouter" else "OpenAI"
+        try:
+            key = cloud_key(provider)
+            if not key:
+                speech_status["message"] = f"No {label} key is saved. Used local Whisper; add your key in Settings."
+            else:
+                text = hear(audio, key, language, terms(), model=model, provider=provider)
+                engine = f"openrouter:{model}" if provider == "openrouter" else model
+                speech_status.update(engine=engine, message=f"Transcribed with {SPEECH_CATALOG[provider][model]} via {label}.")
+                return {"text": text, "segments": []}, engine
+        except Exception as error:
+            code = getattr(error, "code", None)
+            reason = {401: "API key was rejected", 403: "API access was denied",
+                      429: "API quota or rate limit reached"}.get(code, "API request failed or timed out")
+            if isinstance(error, PermissionError):
+                reason = "Keychain access was denied; save your API key again in Settings or restart Saydown to retry"
+            if isinstance(error, ValueError) and len(audio) * 2 + 44 > 24_000_000:
+                reason = "Recording exceeds the API upload limit"
+            speech_status["message"] = f"{reason}. Used local Whisper instead."
+            print(speech_status["message"])
+    with mlx_lock:
+        return local(audio, path_or_hf_repo=WHISPER, initial_prompt=terms() or None, language=language), "local"
+
+
 def clean(raw):
     system = PROMPT
     if terms():
@@ -520,7 +735,7 @@ def fuzzy(text):
 
 def polish(raw):
     """What to type for a transcript: tidied by rule, or by the model when the speaker corrected themselves."""
-    return respell(fuzzy(clean(raw) if CUES.search(raw) else tidy(raw)))
+    return respell(fuzzy(clean(raw) if CUES.search(COURTESY.sub("", raw)) else tidy(raw)))
 
 
 def macro(raw):
@@ -554,7 +769,8 @@ def edit(text, instruction):
 
 def command(said, previous):
     """UNDO, EDIT or TYPE: whether the words just said are a command about the text typed before them."""
-    if "?" in said:  # ponytail: a question is treated as something to type; smaller models call some of them edits
+    # ponytail: a question is treated as something to type; smaller models call some of them edits
+    if "?" in said or not COMMANDISH.search(said) or not EDIT_INTENT.search(said):
         return "TYPE"
     try:
         word = llm(COMMAND_PROMPT, f"<previous>{previous}</previous>\n<said>{said}</said>", temperature=0)
@@ -686,6 +902,7 @@ def make_handler(on_settings_change, on_quit, on_note, taking_note, on_restart, 
             self.send_response(status)
             self.send_header("Content-Type", kind)
             self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", "no-store")
             self.end_headers()
             self.wfile.write(data)
 
@@ -701,9 +918,13 @@ def make_handler(on_settings_change, on_quit, on_note, taking_note, on_restart, 
                 return self.reply((HERE / "ui.html").read_bytes(), "text/html; charset=utf-8")
             if self.path == "/api/state":
                 entries = read_history()
+                provider = settings()["speech_provider"]
+                key_provider = provider if provider in KEYCHAINS else "openai"
                 return self.reply({"history": entries[-300:][::-1], "stats": stats(entries),
                                    "dictionary": term_list(), "settings": settings() | {"hotkey": hotkey()},
                                    "models": MODELS, "setup": status | {"access": access},
+                                   "speech": {"models": SPEECH_CATALOG[key_provider], "key_saved": cloud_key_saved(key_provider),
+                                              "last": dict(speech_status)},
                                    "microphones": microphones(), "languages": LANGUAGES,
                                    "styles": all_styles(), "needs_access": not access["ok"], "note": taking_note(),
                                    "capturing": time.time() < capture["until"], "capture_error": capture["error"]})
@@ -714,9 +935,11 @@ def make_handler(on_settings_change, on_quit, on_note, taking_note, on_restart, 
                 return self.reply({"error": "forbidden"}, status=403)
             try:
                 size = int(self.headers.get("Content-Length", 0))
-                if size > 1_000_000:
+                if not 0 <= size <= 1_000_000:
                     raise ValueError("too large")
                 body = json.loads(self.rfile.read(size) or b"{}")
+                if not isinstance(body, dict):
+                    raise ValueError("bad request")
                 if self.path == "/api/dictionary":
                     DICTIONARY.write_text("".join(t + "\n" for t in valid_terms(body["terms"])))
                 elif self.path == "/api/settings":
@@ -725,6 +948,24 @@ def make_handler(on_settings_change, on_quit, on_note, taking_note, on_restart, 
                     on_settings_change()
                     if settings()["model"] != before:  # download it if need be, and load it
                         threading.Thread(target=setup_ai, daemon=True).start()
+                elif self.path == "/api/speech-key":
+                    if self.headers.get("Content-Type", "").split(";")[0] != "application/json":
+                        return self.reply({"error": "JSON required"}, status=400)
+                    key = body.get("key")
+                    provider = body.get("provider", "openai")
+                    if not isinstance(provider, str) or provider not in KEYCHAINS:
+                        return self.reply({"error": "Unknown speech provider"}, status=400)
+                    if isinstance(key, str):
+                        key = key.strip()
+                    if not isinstance(key, str) or (not key and body.get("remove") is not True):
+                        return self.reply({"error": "Enter an API key, or choose Remove key."}, status=400)
+                    try:
+                        current = dict(settings())
+                        save_cloud_key(key, provider)
+                        # Saving a key is not consent to switch a locally configured app to cloud speech.
+                        SETTINGS.write_text(json.dumps(current, indent=2) + "\n")
+                    except (OSError, ValueError) as error:
+                        return self.reply({"error": str(error)}, status=400)
                 elif self.path == "/api/quit":
                     threading.Timer(0.3, on_quit).start()  # after this reply has gone out
                 elif self.path == "/api/restart":  # after granting permissions, which macOS applies at launch
@@ -1235,13 +1476,17 @@ def main():
         print(f"transcribing {len(audio) / RATE:.1f}s (peak level {np.abs(audio).max():.2f})...")
         start = time.time()
         language = settings()["language"]
-        with mlx_lock:
-            result = mlx_whisper.transcribe(audio, path_or_hf_repo=WHISPER, initial_prompt=terms() or None,
-                                            language=None if language == "auto" else language)
+        language = None if language == "auto" else language
+        result, where = transcribe(audio, language, mlx_whisper.transcribe)
         raw = result["text"].strip()
+        heard = time.time() - start
+
+        def took():  # total, and how much of it was speech to text; the rest is the text model and the paste
+            return f"[{time.time() - start:.1f}s, {where} speech {heard:.1f}s]"
         # Whisper invents words from silence; it also reports how sure it is that nobody spoke
         invented = len(raw.split()) > 6 * len(audio) / RATE + 3  # nobody speaks six words a second
-        if not raw or invented or all(seg["no_speech_prob"] > 0.6 for seg in result["segments"]):
+        silent = result["segments"] and all(seg["no_speech_prob"] > 0.6 for seg in result["segments"])  # Whisper only
+        if not raw or invented or silent:
             print("skipped: no speech heard")
             return
         if as_note:  # ponytail: one voice, no speaker labels; needs a diarisation model to tell people apart
@@ -1255,7 +1500,7 @@ def main():
                 new = last["before"] if kind == "UNDO" else edit(last["text"], raw)  # before any key is sent
                 # ponytail: ⌘Z assumes nothing was typed since the paste; select the text instead if that bites
                 press(6, COMMAND)
-                print(f"[{time.time() - start:.1f}s] voice command {kind}: {raw}")
+                print(f"{took()} voice command {kind}: {raw}")
                 if new is None:  # undoing a plain dictation: nothing to put back
                     last_paste[0] = None
                     return
@@ -1277,7 +1522,7 @@ def main():
             return
         paste(text + " ")  # trailing space so back-to-back dictations don't run together
         last_paste[0] = {"text": text, "at": time.time(), "before": None}
-        print(f"[{time.time() - start:.1f}s] raw:   {raw}\n        clean: {text}")
+        print(f"{took()} raw:   {raw}\n        clean: {text}")
         remember(text, raw, len(audio) / RATE)
 
     def remember(text, raw, audio_s, **extra):
@@ -1402,6 +1647,7 @@ if __name__ == "__main__":
                            ("Make sure the report is shorter.", "TYPE")]:
             assert command(said, two) == want, f"{said!r} -> {command(said, two)}"
         print("ok: voice command detection")
+        assert not COMMANDISH.search("Just compare the Camry LE and the Accord LX") and COMMANDISH.search("never mind")
         old = [{"ts": noon(1), "text": "Pricing: we go with the freemium plan."},
                {"ts": noon(2), "text": "Remind me to call the dentist."}]
         assert [e["ts"] for e in relevant(old, "what did I say about pricing")] == [noon(1), noon(2)]

@@ -53,8 +53,9 @@
   #setup h2 { font-size: 17px; margin: 0 0 2px; }
   #setup h2 + p { margin: 0 0 6px; color: var(--muted); }
   #setup h3 { margin: 14px 0 0; font-size: 12px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
-  /* until the three permissions are granted the checklist is the whole window */
-  body.gate nav button, body.gate main section { display: none; }
+  /* Settings remain available while recording permissions are pending. */
+  body.gate nav button:not([data-view="settings"]):not([data-view="dictation"]),
+  body.gate main section:not(#settings) { display: none; }
   body.gate #setup { padding: 26px 28px; margin-top: 8px; }
   body.gate #setup h2 { font-size: 26px; letter-spacing: -0.02em; }
   .step { display: grid; grid-template-columns: 22px 1fr auto; gap: 10px; align-items: center; padding: 9px 0; }
@@ -106,6 +107,12 @@
   select { border: 1px solid var(--line); border-radius: 9px; padding: 7px 10px; background: var(--card); max-width: 260px; }
   input[type="range"] { width: 180px; accent-color: var(--accent); }
   input[type="checkbox"] { width: 18px; height: 18px; accent-color: var(--accent); }
+  .speech-key { padding: 14px 18px; display: grid; gap: 10px; border-top: 1px solid var(--line); }
+  .speech-key .actions { flex-wrap: wrap; }
+  .speech-key input { flex: 1; min-width: 150px; width: 220px; }
+  .speech-key small, .speech-note { color: var(--muted); font-size: 13px; }
+  .speech-note { padding: 0 18px 14px; margin: 0; }
+  #speech-feedback { white-space: normal; }
   kbd { background: var(--accent-soft); border-radius: 6px; padding: 1px 7px; font: inherit; font-weight: 600; }
   .keys { margin: 0; padding: 14px 18px 14px 38px; }
   .keys li { padding: 3px 0; }
@@ -134,7 +141,7 @@
   <div class="banner" id="gone" hidden>Saydown has quit. You can close this window.</div>
   <section id="dictation">
     <h1>Your dictations</h1>
-    <p class="lead">Everything here stays on this Mac.</p>
+    <p class="lead">Your dictation history, saved on this Mac.</p>
     <div class="tiles">
       <div class="tile"><b id="words">0</b><span>total words</span></div>
       <div class="tile"><b id="wpm">0</b><span>words per minute</span></div>
@@ -202,13 +209,40 @@
         <span class="control"><select id="language"></select></span>
       </label>
     </div>
-    <p class="day">Cleanup and display</p>
+    <p class="day">Speech-to-text</p>
     <div class="card">
       <label class="field">
-        <span>Cleanup model</span>
-        <small>Runs on this Mac. Choosing one you do not have yet downloads it.</small>
-        <span class="control"><select id="model"></select></span>
+        <span>Transcription service</span>
+        <small>Use your Mac, or pay for transcription with your own API account.</small>
+        <span class="control"><select id="speech-provider">
+          <option value="local">Local Whisper · no API fees</option>
+          <option value="openai">OpenAI · paid API</option>
+          <option value="openrouter">OpenRouter · paid API</option>
+        </select></span>
       </label>
+      <div id="cloud-speech" hidden>
+        <label class="field">
+          <span>API speech model</span>
+          <small>Only speech-to-text uses this model. Cleanup, Ask, and rewrites still run locally.</small>
+          <span class="control"><select id="speech-model"></select></span>
+        </label>
+        <form class="speech-key" id="speech-key-form">
+          <label for="speech-key"><span id="speech-key-label">OpenAI API key</span> <small id="speech-key-status"></small></label>
+          <div class="actions">
+            <input id="speech-key" type="password" autocomplete="off" spellcheck="false" autocapitalize="off" placeholder="Paste your API key" aria-label="OpenAI API key">
+            <button class="btn" id="speech-key-save" type="submit">Save key</button>
+            <button class="btn" id="speech-key-remove" type="button">Remove key</button>
+          </div>
+          <small>Stored in macOS Keychain. The saved key is never displayed.</small>
+        </form>
+        <p class="speech-note" id="speech-privacy">OpenAI receives your recording and dictionary hints. API usage is billed separately from ChatGPT. If a request fails, Saydown uses local Whisper automatically.</p>
+        <p class="speech-note" id="speech-model-note">Prefer GPT Transcribe for new setups. The legacy models are scheduled to retire on February 26, 2027.</p>
+      </div>
+      <p class="speech-note" id="speech-feedback" role="status" aria-live="polite"></p>
+      <p class="speech-note" id="speech-last"></p>
+    </div>
+    <p class="day">Cleanup and display</p>
+    <div class="card">
       <label class="field">
         <span>Idle pill visibility <span id="alpha-value"></span></span>
         <small>How visible the on-screen pill is when you are not dictating.</small>
@@ -270,6 +304,7 @@ function showView(name) {
     if (button.dataset.view === name) button.setAttribute("aria-current", "page"); else button.removeAttribute("aria-current");
   }
   for (const section of document.querySelectorAll("main section")) section.hidden = section.id !== name;
+  if (state) renderSetup();
 }
 
 function copyButton(text) {
@@ -467,7 +502,30 @@ function fill(select, options, value) {  // options: [[value, label], ...]
   select.value = value;
 }
 
+function renderSpeech() {
+  const speech = state.speech;
+  if (!speech) return;
+  const provider = state.settings.speech_provider, router = provider === "openrouter";
+  const label = router ? "OpenRouter" : "OpenAI";
+  const model = state.settings[router ? "openrouter_model" : "speech_model"];
+  if (document.activeElement !== $("#speech-provider")) $("#speech-provider").value = state.settings.speech_provider;
+  if (document.activeElement !== $("#speech-model")) fill($("#speech-model"), Object.entries(speech.models), model);
+  $("#cloud-speech").hidden = provider === "local";
+  $("#speech-key-label").textContent = label + " API key";
+  $("#speech-key").setAttribute("aria-label", label + " API key");
+  $("#speech-privacy").textContent = router
+    ? "OpenRouter and its transcription provider receive your recording and dictionary hints. Usage is billed to your OpenRouter account. If a request fails, Saydown uses local Whisper automatically."
+    : "OpenAI receives your recording and dictionary hints. API usage is billed separately from ChatGPT. If a request fails, Saydown uses local Whisper automatically.";
+  $("#speech-model-note").hidden = router;
+  $("#speech-key-status").textContent = speech.key_saved ? "— saved in Keychain" : "— no key saved";
+  $("#speech-key-remove").disabled = speechBusy || !speech.key_saved;
+  $("#speech-last").textContent = speech.last.message ? "Last dictation: " + speech.last.message : (state.settings.speech_provider === "local"
+    ? "Speech stays on this Mac. No recording is uploaded."
+    : "Choose a model and save your key. Changes apply to your next dictation.");
+}
+
 function renderSettings() {
+  renderSpeech();
   for (const kbd of document.querySelectorAll(".hk")) kbd.textContent = state.settings.hotkey.label;
   $("#hotkey-change").textContent = state.capturing ? "Press it now…" : "Change";
   $("#hotkey-change").disabled = state.capturing;
@@ -478,7 +536,6 @@ function renderSettings() {
   if (document.activeElement && document.activeElement.closest("#settings")) return;  // don't fight the user's hand
   fill($("#microphone"), [["", "Auto-detect"], ...state.microphones.map((name) => [name, name])], state.settings.microphone);
   fill($("#language"), Object.entries(state.languages), state.settings.language);
-  fill($("#model"), Object.entries(state.models), state.settings.model);
   $("#alpha").value = Math.round(state.settings.idle_alpha * 100);
   $("#alpha-value").textContent = "(" + Math.round(state.settings.idle_alpha * 100) + "%)";
   $("#save-history").checked = state.settings.save_history;
@@ -504,7 +561,9 @@ function renderSetup() {  // the first-run checklist: permissions first, and the
   downloads.push({done: ai.step === "ready", name: "AI features", detail, progress: ai.total ? ai.done / ai.total : null});
   const granted = permissions.filter((step) => step.done).length, gate = granted < permissions.length;
   document.body.classList.toggle("gate", gate);
-  box.hidden = !gate && downloads.every((step) => step.done);
+  $("nav button[data-view='dictation']").textContent = gate ? "Setup" : "Dictation";
+  const settingsOpen = $("nav button[data-view='settings']").getAttribute("aria-current") === "page";
+  box.hidden = (gate && settingsOpen) || (!gate && downloads.every((step) => step.done));
   if (box.hidden || !changed("setup", [...permissions, ...downloads].map(({button, ...rest}) => rest))) return;
   const row = (step, mark) => {
     const line = el("div", "step" + (step.done ? " done" : "")), text = el("div");
@@ -554,8 +613,47 @@ $("#add-term").onsubmit = (event) => {
   $("#new-term").value = "";
 };
 $("#hotkey-change").onclick = () => { $("#hotkey-change").blur(); post("/api/hotkey/capture"); };
+let speechBusy = false;
+async function saveSpeech(path, body) {
+  if (speechBusy) return false;
+  speechBusy = true;
+  for (const id of ["speech-key-save", "speech-key-remove", "speech-provider", "speech-model"]) $("#" + id).disabled = true;
+  $("#speech-feedback").textContent = "Saving…";
+  try {
+    const response = await send(path, body), data = await response.json();
+    if (!response.ok) throw new Error(data.error || "Couldn’t save. Try again.");
+    $("#speech-feedback").textContent = path === "/api/speech-key"
+      ? (body.remove ? "Key removed from Keychain." : "Key saved in Keychain. It will be checked on your next API dictation.")
+      : "Saved. Your next dictation will use this selection.";
+    await load();
+    return true;
+  } catch (error) {
+    $("#speech-feedback").textContent = error.message || "Couldn’t reach Saydown. Try again.";
+    $("#speech-provider").value = state.settings.speech_provider;
+    $("#speech-model").value = state.settings[state.settings.speech_provider === "openrouter" ? "openrouter_model" : "speech_model"];
+    return false;
+  } finally {
+    speechBusy = false;
+    for (const id of ["speech-key-save", "speech-key-remove", "speech-provider", "speech-model"]) $("#" + id).disabled = false;
+    renderSpeech();
+  }
+}
+$("#speech-provider").onchange = (event) => {
+  $("#speech-key").value = "";
+  saveSpeech("/api/settings", {speech_provider: event.target.value});
+};
+$("#speech-model").onchange = (event) => saveSpeech("/api/settings", {
+  [state.settings.speech_provider === "openrouter" ? "openrouter_model" : "speech_model"]: event.target.value
+});
+$("#speech-key-form").onsubmit = async (event) => {
+  event.preventDefault();
+  const key = $("#speech-key").value.trim();
+  if (!key) { $("#speech-feedback").textContent = "Paste an API key first."; return; }
+  $("#speech-key").value = "";
+  await saveSpeech("/api/speech-key", {key, provider: state.settings.speech_provider});
+};
+$("#speech-key-remove").onclick = () => saveSpeech("/api/speech-key", {key: "", remove: true, provider: state.settings.speech_provider});
 for (const key of ["microphone", "language"]) $("#" + key).onchange = (event) => post("/api/settings", {[key]: event.target.value});
-$("#model").onchange = (event) => post("/api/settings", {model: event.target.value});
 $("#alpha").oninput = (event) => $("#alpha-value").textContent = "(" + event.target.value + "%)";
 $("#alpha").onchange = (event) => post("/api/settings", {idle_alpha: event.target.value / 100});
 $("#save-history").onchange = (event) => post("/api/settings", {save_history: event.target.checked});

@@ -2,7 +2,7 @@
 
 Hold a key, talk, release. Cleaned-up text is pasted at your cursor, in any app.
 
-A local, private take on Wispr Flow for Apple Silicon Macs. Your audio and text never leave your machine: speech is transcribed by Whisper and tidied by a small language model, both running on your Mac.
+A personal dictation app for Apple Silicon Macs. By default, speech is transcribed by Whisper and tidied by a small language model on your Mac. You can also choose paid [OpenAI](#paid-speech-through-openai) or [OpenRouter](#paid-speech-through-openrouter) transcription in Settings; those options upload audio and dictionary hints.
 
 ## What it does
 
@@ -100,6 +100,19 @@ Record a note, in the window, records without typing anything: stop it from the 
 
 Most dictations are tidied by rules, with no model call: filler sounds (um, uh, hmm) and stutters are dropped, and words that are nearly a dictionary term are respelled. The cleanup model runs only when you correct yourself ("no wait", "sorry", "I mean", "actually", "scratch that"), because working out what you meant is the one job the rules cannot do. This saves about a second on a typical dictation.
 
+Complete courtesy sentences such as "Sorry I am late." and "Sorry for the delay."
+stay on the rule path. Ambiguous apologies and any additional correction cue
+still use the model. With voice commands enabled, ordinary references such as
+"Please send that file to Alex" are typed directly; an editing cue is required
+before the command classifier runs.
+
+For lower local transcription latency when dictating in English, choose
+**Settings → Dictation language → English**. Auto-detect runs an extra language
+detection pass. Keep Auto-detect if you need to switch between languages.
+Recording already runs separately from transcription, so you can start the next
+recording while the previous dictation is processed. Two simultaneous Whisper
+model processes compete for the GPU and can increase individual request latency.
+
 Pasting uses the clipboard, and whatever you had copied is put back straight afterwards.
 
 While a password field has the keyboard, macOS hides key presses from every app, so a shortcut such as ⌘B cannot be seen. The pill says "Shortcut paused" until you leave the field; clicking the pill still works.
@@ -132,10 +145,14 @@ x ai -> xAI
 
 | Setting | How | Default |
 |---|---|---|
-| Cleanup model | Settings tab (the choices are `MODELS` at the top of `dictate.py`) | `gemma-4-e4b-it-5bit` |
 | Shortcut | Settings tab: click Change, then press any single modifier key, a function key, or a combination such as ⌘E | right Option |
 | Microphone | Settings tab | system default |
 | Dictation language | Settings tab | auto-detect |
+| Transcription service | Settings → Speech-to-text | Local Whisper (existing OpenAI opt-ins are preserved) |
+| API speech model | Settings → Speech-to-text | GPT Transcribe |
+| OpenAI API key | Settings → Speech-to-text; stored in macOS Keychain | none |
+| OpenRouter speech model | Settings → Speech-to-text | Whisper Large V3 Turbo |
+| OpenRouter API key | Settings → Speech-to-text; separate macOS Keychain entry | none |
 | Idle pill visibility | Settings tab | 30% |
 | Save history | Settings tab | on |
 | Whisper model | `WHISPER` at the top of `dictate.py` | `whisper-large-v3-turbo` |
@@ -146,6 +163,57 @@ On a 16 GB M5 MacBook Air, scored with `bench.py` (42 checks of cleanup, rewriti
 |---|---|---|---|
 | `gemma-4-e4b-it-5bit` | 42/42 | 0.6s | The default; 5.7 GB |
 | `gemma-4-e4b-it-4bit` | 40/42 | 0.6s | 4.8 GB; missed one self-correction and one voice command |
+
+## Paid speech through OpenAI
+
+In your existing Saydown window, open **Settings → Speech-to-text**:
+
+1. Select **OpenAI · paid API**.
+2. Choose **GPT Transcribe**, **GPT-4o Mini Transcribe**, **GPT-4o Transcribe**, or **Whisper API**.
+3. Paste your OpenAI API key and click **Save key**. It goes directly to macOS Keychain, not settings, logs, or process arguments. The app never sends the saved key back to the settings page.
+4. Dictate normally with your existing shortcut or pill. Changes apply to the next dictation without a restart.
+
+API use is billed to your OpenAI API account separately from a ChatGPT subscription. OpenAI receives your recording and dictionary hints. Cleanup, Ask, rewriting, and history stay local.
+
+Select **Local Whisper** to keep speech entirely on your Mac, even with a saved API key. **Remove key** deletes the Saydown key from Keychain. Saving a key alone does not switch a locally configured app to OpenAI.
+
+If the key is missing or rejected, the network fails, a rate limit is reached, or a recording exceeds the upload limit, local Whisper takes over. The Settings card reports the service actually used and any fallback. No automatic paid retry is made. API requests have a 30-second timeout; a fallback after a network problem can therefore take longer than a normal dictation.
+
+Existing key-only OpenAI configurations retain `gpt-4o-mini-transcribe` until you make a new selection. New setups should prefer `gpt-transcribe`; OpenAI has scheduled the three legacy models for removal on February 26, 2027. See [file transcription](https://developers.openai.com/api/docs/guides/speech-to-text) and [deprecations](https://developers.openai.com/api/docs/deprecations).
+
+For a focused offline regression suite (with Saydown's Python dependencies installed):
+
+```sh
+python -m unittest test_speech -v
+```
+
+The suite uses temporary settings and mocked API/Keychain calls; it does not record, upload audio, use credits, or change your saved key.
+
+## Paid speech through OpenRouter
+
+Open **Settings → Speech-to-text**, select **OpenRouter · paid API**, choose a
+speech model, paste your **OpenRouter API key**, and click **Save key**.
+
+The available models are Whisper Large V3 Turbo, Whisper Large V3, GPT Transcribe,
+GPT-4o Mini Transcribe, and GPT-4o Transcribe. Availability and price depend on
+your OpenRouter account and its current catalog. Requests go to OpenRouter's
+`/api/v1/audio/transcriptions` endpoint with the selected namespaced model ID.
+See [OpenRouter's transcription documentation](https://openrouter.ai/blog/tutorials/transcription-on-openrouter/).
+
+OpenRouter and its upstream transcription provider receive your recording and
+dictionary hints. Usage is billed to your OpenRouter account. The key is stored
+as `saydown-openrouter` in macOS Keychain, separately from `saydown-openai`.
+Selecting or removing one provider's key does not change the other's key or
+model selection. Local Whisper makes no API request even when keys are saved.
+Saydown reads keys directly through macOS Keychain in its own process and reuses
+them in memory while running; it does not invoke the `security` command to read
+secrets. Saving or removing a key immediately updates that session cache. If
+Keychain denies access, Saydown falls back locally without repeating the access
+prompt on every dictation. Save the key again in Settings or restart Saydown to
+retry. Settings labels old transcription results as **Last dictation**, and a
+successful key save clears the earlier failure message.
+The same local fallback applies if the key is missing, the request fails, or
+the upload exceeds the limit. Cleanup, Ask, rewriting, and history remain local.
 
 ## How it works
 
