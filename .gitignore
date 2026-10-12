@@ -5,3 +5,4 @@ settings.json
 styles.json
 embeddings.npz
 dist/
+.DS_Store

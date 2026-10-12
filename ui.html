@@ -44,7 +44,7 @@
   .row { display: grid; grid-template-columns: 76px 1fr auto; gap: 12px; align-items: start; padding: 13px 16px; }
   .row + .row { border-top: 1px solid var(--line); }
   .row time { color: var(--muted); font-size: 13px; padding-top: 2px; font-variant-numeric: tabular-nums; }
-  .row p { margin: 0; overflow-wrap: anywhere; }
+  .row p { margin: 0; overflow-wrap: anywhere; white-space: pre-wrap; }
   .row p.long { max-height: 9em; overflow: auto; }
   .note-bar { display: flex; gap: 12px; align-items: center; margin-bottom: 22px; }
   .empty { padding: 26px 18px; color: var(--muted); }
@@ -54,8 +54,7 @@
   #setup h2 + p { margin: 0 0 6px; color: var(--muted); }
   #setup h3 { margin: 14px 0 0; font-size: 12px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
   /* Settings remain available while recording permissions are pending. */
-  body.gate nav button:not([data-view="settings"]):not([data-view="dictation"]),
-  body.gate main section:not(#settings) { display: none; }
+  /* History and its Copy buttons stay available even when recording permissions are missing. */
   body.gate #setup { padding: 26px 28px; margin-top: 8px; }
   body.gate #setup h2 { font-size: 26px; letter-spacing: -0.02em; }
   .step { display: grid; grid-template-columns: 22px 1fr auto; gap: 10px; align-items: center; padding: 9px 0; }
@@ -138,6 +137,7 @@
 </nav>
 <main>
   <div class="banner" id="setup" hidden></div>
+  <div class="banner" id="delivery" hidden></div>
   <div class="banner" id="gone" hidden>Saydown has quit. You can close this window.</div>
   <section id="dictation">
     <h1>Your dictations</h1>
@@ -554,7 +554,7 @@ function renderSetup() {  // the first-run checklist: permissions first, and the
     button: setup.mic === false ? open("microphone") : ["Ask me again", () => send("/api/ask-microphone")],
     detail: setup.mic === true ? "Allowed." : setup.mic === false ? "Lets Saydown hear you. It was refused earlier: switch Saydown on in the list."
       : "Lets Saydown hear you. Click Allow when macOS asks."});
-  downloads.push({done: !setup.loading, name: "Speech model", detail: setup.loading ? "Loading. The first time, this downloads about 1.6 GB and can take several minutes." : "Ready."});
+  downloads.push({done: !setup.loading && !setup.speech_error, name: "Speech model", detail: setup.speech_error || (setup.loading ? "Loading. The first time, this downloads about 1.6 GB and can take several minutes." : "Ready.")});
   const size = ai.total ? gigabytes(ai.done) + " of " + gigabytes(ai.total) : "";
   const detail = {checking: "Checking…", starting: "Loading the AI model…", model: "Downloading the AI model. " + size + ".",
     ready: "Ready.", failed: "Not set up: " + ai.error + ". Dictation still works; Saydown tries again the next time it opens."}[ai.step];
@@ -575,7 +575,7 @@ function renderSetup() {  // the first-run checklist: permissions first, and the
   };
   box.replaceChildren(el("h2", "", gate ? "Welcome to Saydown" : "Finishing setup"));
   if (gate) {
-    box.append(el("p", "", "Allow these three things and you are ready. macOS asks only once. " + granted + " of 3 done."));
+    box.append(el("p", "", "Allow these three things to record and paste. " + granted + " of 3 done. Your saved dictations remain available below."));
     permissions.forEach((step, index) => box.append(row(step, String(index + 1))));
     const line = el("div", "step"), restart = el("button", "btn primary", "Restart Saydown");
     restart.onclick = () => send("/api/restart");
@@ -588,7 +588,10 @@ function renderSetup() {  // the first-run checklist: permissions first, and the
 let quitting = false;
 function render() {  // rebuild a list only when its data changed, so open panels and half-typed forms are left alone
   renderSetup();
+  $("#delivery").textContent = state.setup.delivery || "";
+  $("#delivery").hidden = !state.setup.delivery;
   $("#note").textContent = state.note ? "Stop and save note" : "Record a note";
+  $("#note").disabled = !state.note && (state.setup.loading || state.setup.mic !== true || (state.setup.speech_error && state.settings.speech_provider === "local"));
   if (changed("history", [state.history, state.stats, state.styles])) renderHistory();
   if (changed("dictionary", state.dictionary)) renderDictionary();
   if (changed("styles", state.styles)) renderStyles();

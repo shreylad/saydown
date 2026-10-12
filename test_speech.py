@@ -346,6 +346,411 @@ class SpeechTests(unittest.TestCase):
                 self.a.command(text, "Previous message.")
                 llm.assert_called_once()
 
+    def test_user_agenda_becomes_four_lines_with_introduction(self):
+        introduction = "Thank you so much for reaching me out. I am writing to see that like how is everything going."
+        raw = (introduction + " First our agenda is doing apple tree, second agenda is doing green tree, "
+               "second third agenda is cleaning the grass and fourth agenda is making a barn house.")
+        expected = (introduction + "\n\n1. Our agenda is doing apple tree\n2. Agenda is doing green tree\n"
+                    "3. Agenda is cleaning the grass\n4. Agenda is making a barn house.")
+        with patch.object(self.a, "llm") as llm:
+            self.assertEqual(self.a.polish(raw), expected)
+            llm.assert_not_called()
+
+    def test_spoken_lists_with_punctuation_or_without_it(self):
+        samples = {
+            "First, review the report. Second, send the invoice.": "1. Review the report.\n2. Send the invoice.",
+            "first buy apples second buy pears third buy milk": "1. Buy apples\n2. Buy pears\n3. Buy milk",
+            "First: apples; and second: pears.": "1. Apples\n2. Pears.",
+            "1st review the report, 2nd send it, third archive it.": "1. Review the report\n2. Send it\n3. Archive it.",
+            "FIRST review this, SECOND send that.": "1. Review this\n2. Send that.",
+        }
+        for raw, expected in samples.items():
+            with self.subTest(raw=raw):
+                self.assertEqual(self.a.polish(raw), expected)
+
+    def test_normal_ordinals_and_incomplete_lists_are_unchanged(self):
+        samples = ["This is my first time here and I am having second thoughts.",
+                   "First review the first draft. Send the second version tomorrow.",
+                   "Our first year went well and our second year was better.",
+                   "First place and second place receive prizes.",
+                   "First review the report.", "Second review the report. Third send it.",
+                   "First review it, third send it.", "First review it, second send it, second archive it.",
+                   "First, second, third.", "First review it, second.",
+                   "First review it, second send it, fourth archive it."]
+        for raw in samples:
+            with self.subTest(raw=raw):
+                self.assertEqual(self.a.polish(raw), raw)
+
+    def test_ordinals_inside_items_are_preserved(self):
+        raw = "First review the first draft on the second floor. Second send the second version."
+        self.assertEqual(self.a.polish(raw),
+                         "1. Review the first draft on the second floor.\n2. Send the second version.")
+
+    def test_self_correction_is_cleaned_before_list_formatting(self):
+        raw = "First send it Tuesday, I mean Wednesday. Second archive it."
+        with patch.object(self.a, "clean", return_value="First send it Wednesday. Second archive it.") as clean:
+            self.assertEqual(self.a.polish(raw), "1. Send it Wednesday.\n2. Archive it.")
+        clean.assert_called_once_with(raw)
+
+    def test_list_formatting_preserves_dictionary_spellings(self):
+        with patch.object(self.a, "term_list", return_value=["apple tree -> AppleTree"]):
+            self.assertEqual(self.a.polish("First work on apple tree, second plant pears."),
+                             "1. Work on AppleTree\n2. Plant pears.")
+
+    def test_all_ten_ordinals_and_repeated_formatting(self):
+        words = ("first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth", "ninth", "tenth")
+        raw = ", ".join(f"{word} do task {i}" for i, word in enumerate(words, 1))
+        expected = "\n".join(f"{i}. Do task {i}" for i in range(1, 11))
+        self.assertEqual(self.a.polish(raw), expected)
+        self.assertEqual(self.a.spoken_list(expected), expected)
+
+    def test_paste_keeps_numbered_lines_in_a_single_clipboard_paste(self):
+        text = self.a.polish("First review it, second send it.")
+        board = Mock()
+        board.pasteboardItems.return_value = []
+        appkit = Mock()
+        appkit.NSPasteboard.generalPasteboard.return_value = board
+        appkit.NSPasteboardTypeString = self.a.AppKit.NSPasteboardTypeString
+        with patch.object(self.a, "AppKit", appkit), \
+             patch.object(self.a, "press") as press, patch.object(self.a.threading, "Timer"):
+            self.a.paste(text)
+        board.setString_forType_.assert_called_once_with("1. Review it\n2. Send it.", self.a.AppKit.NSPasteboardTypeString)
+        press.assert_called_once_with(9, self.a.COMMAND)
+
+    def test_user_unnumbered_agenda_becomes_four_bullets(self):
+        raw = ("Here is our agenda for the day. Cooking home, working on the app, "
+               "freely running on the loan and working crazy on the computer.")
+        expected = ("Here is our agenda for the day.\n\n- Cooking home\n- Working on the app\n"
+                    "- Freely running on the loan\n- Working crazy on the computer.")
+        with patch.object(self.a, "llm") as llm:
+            self.assertEqual(self.a.polish(raw), expected)
+            llm.assert_not_called()
+
+    def test_bullet_introductions_and_inline_lists(self):
+        samples = {
+            "Here are my tasks: writing code, testing it, and shipping it.":
+                "Here are my tasks:\n\n- Writing code\n- Testing it\n- Shipping it.",
+            "Our agenda includes cooking at home, working on the app and running outside.":
+                "Our agenda includes\n\n- Cooking at home\n- Working on the app\n- Running outside.",
+            "My goals for today are cooking at home and working on the app.":
+                "My goals for today are\n\n- Cooking at home\n- Working on the app.",
+            "Shopping list: apples, bread, and milk.":
+                "Shopping list:\n\n- Apples\n- Bread\n- Milk.",
+            "Today's priorities: testing the app; fixing the errors; shipping it.":
+                "Today's priorities:\n\n- Testing the app\n- Fixing the errors\n- Shipping it.",
+        }
+        for raw, expected in samples.items():
+            with self.subTest(raw=raw):
+                self.assertEqual(self.a.polish(raw), expected)
+
+    def test_bullets_keep_compound_phrases_and_protected_commas(self):
+        samples = {
+            "Our agenda: research and development, testing the app and reviewing the budget.":
+                "Our agenda:\n\n- Research and development\n- Testing the app\n- Reviewing the budget.",
+            'My tasks: reading "Research, Development", writing the report.':
+                'My tasks:\n\n- Reading "Research, Development"\n- Writing the report.',
+            "My tasks: checking costs (food, transport), paying 1,200 dollars, and filing receipts.":
+                "My tasks:\n\n- Checking costs (food, transport)\n- Paying 1,200 dollars\n- Filing receipts.",
+            "My tasks: studying cooking and cleaning techniques, testing the app.":
+                "My tasks:\n\n- Studying cooking and cleaning techniques\n- Testing the app.",
+        }
+        for raw, expected in samples.items():
+            with self.subTest(raw=raw):
+                self.assertEqual(self.a.polish(raw), expected)
+
+    def test_bullets_keep_greetings_and_closing_prose(self):
+        raw = "Hello team. Here is our agenda. Cooking at home, working on the app. Thanks for your help."
+        self.assertEqual(self.a.polish(raw),
+                         "Hello team. Here is our agenda.\n\n- Cooking at home\n- Working on the app.\n\nThanks for your help.")
+
+    def test_ordinary_comma_prose_and_single_tasks_stay_unchanged(self):
+        samples = ["I enjoy cooking at home, working on the app, and running outside.",
+                   "We discussed the agenda yesterday, worked on the app, and went home.",
+                   "Our agenda was useful, interesting, and practical.",
+                   "Here is our agenda. Working on the app.",
+                   "The agenda is ready, but we have not agreed on the tasks.",
+                   "The agenda is new, exciting, and useful.",
+                   "My tasks: cooking at home,, working on the app.",
+                   'My tasks: reading "Cooking, writing the report.']
+        for raw in samples:
+            with self.subTest(raw=raw):
+                self.assertEqual(self.a.polish(raw), raw)
+
+    def test_numbered_agenda_keeps_numbered_format(self):
+        self.assertEqual(self.a.polish("Our agenda: first cook dinner, second work on the app."),
+                         "Our agenda:\n\n1. Cook dinner\n2. Work on the app.")
+
+    def test_bullet_formatting_preserves_existing_lists(self):
+        for text in ["Our agenda:\n\n- Cooking, cleaning\n- Working on the app.",
+                     "Our agenda:\n\n1. Cooking, cleaning\n2. Working on the app."]:
+            self.assertEqual(self.a.spoken_bullets(text), text)
+
+    def test_bullets_format_after_corrections_and_dictionary(self):
+        with patch.object(self.a, "clean", return_value="My tasks: working on say down, cooking at home."), \
+             patch.object(self.a, "term_list", return_value=["say down -> Saydown"]):
+            self.assertEqual(self.a.polish("My tasks: working on say down, cooking, I mean cooking at home."),
+                             "My tasks:\n\n- Working on Saydown\n- Cooking at home.")
+
+    def test_bullet_paste_keeps_all_items_in_one_clipboard_operation(self):
+        text = self.a.polish("My tasks: cooking at home, working on the app.")
+        board, appkit = Mock(), Mock()
+        board.pasteboardItems.return_value = []
+        appkit.NSPasteboard.generalPasteboard.return_value = board
+        appkit.NSPasteboardTypeString = self.a.AppKit.NSPasteboardTypeString
+        with patch.object(self.a, "AppKit", appkit), patch.object(self.a, "press") as press, \
+             patch.object(self.a.threading, "Timer"):
+            self.a.paste(text)
+        board.setString_forType_.assert_called_once_with("My tasks:\n\n- Cooking at home\n- Working on the app.",
+                                                        appkit.NSPasteboardTypeString)
+        press.assert_called_once_with(9, self.a.COMMAND)
+
+    def test_user_repeated_intent_agenda_without_intro_punctuation(self):
+        raw = ("This is the agenda of the day I am going to cook, I am going to drive my car, "
+               "I am going to clean the grasses and I am going to make the pesticides to clean "
+               "the bad insects from the garden")
+        expected = ("This is the agenda of the day\n\n- I am going to cook\n- I am going to drive my car\n"
+                    "- I am going to clean the grasses\n- I am going to make the pesticides to clean "
+                    "the bad insects from the garden")
+        with patch.object(self.a, "llm") as llm:
+            self.assertEqual(self.a.polish(raw), expected)
+            llm.assert_not_called()
+
+    def test_intent_lists_handle_punctuation_contractions_and_multiple_ands(self):
+        samples = {
+            "This is our agenda. I am going to cook, I am going to drive and I am going to clean.":
+                "This is our agenda.\n\n- I am going to cook\n- I am going to drive\n- I am going to clean.",
+            "This is our agenda I'm going to cook and I'm going to drive and I'm going to clean.":
+                "This is our agenda\n\n- I'm going to cook\n- I'm going to drive\n- I'm going to clean.",
+            "Here are our tasks we will cook we will drive we will clean":
+                "Here are our tasks\n\n- We will cook\n- We will drive\n- We will clean",
+            "My tasks for today are I need to cook, I need to drive and I need to clean.":
+                "My tasks for today are\n\n- I need to cook\n- I need to drive\n- I need to clean.",
+            "That's my agenda I’m going to cook, I’m going to drive.":
+                "That's my agenda\n\n- I’m going to cook\n- I’m going to drive.",
+            "This is the agenda of the day cooking at home, working on the app.":
+                "This is the agenda of the day\n\n- Cooking at home\n- Working on the app.",
+        }
+        for raw, expected in samples.items():
+            with self.subTest(raw=raw):
+                self.assertEqual(self.a.polish(raw), expected)
+
+    def test_repeated_action_sentences_are_bullets_and_keep_closing_prose(self):
+        samples = {
+            "This is our agenda. I will cook. I will drive. I will clean. Thanks for your help.":
+                "This is our agenda.\n\n- I will cook.\n- I will drive.\n- I will clean.\n\nThanks for your help.",
+            "Our agenda: Cooking at home. Working on the app. Thank you.":
+                "Our agenda:\n\n- Cooking at home.\n- Working on the app.\n\nThank you.",
+        }
+        for raw, expected in samples.items():
+            with self.subTest(raw=raw):
+                self.assertEqual(self.a.polish(raw), expected)
+
+    def test_repeated_intent_preserves_compounds_subordinate_clauses_and_quotes(self):
+        samples = {
+            "My tasks: I will cook fish and chips, I will drive and I will clean.":
+                "My tasks:\n\n- I will cook fish and chips\n- I will drive\n- I will clean.",
+            "Our agenda: I will decide whether I will drive, I will cook.":
+                "Our agenda:\n\n- I will decide whether I will drive\n- I will cook.",
+            'Our agenda: I will read "I will cook, I will drive", I will clean.':
+                'Our agenda:\n\n- I will read "I will cook, I will drive"\n- I will clean.',
+            "My tasks: I will cook (if I will be home), I will work on the app.":
+                "My tasks:\n\n- I will cook (if I will be home)\n- I will work on the app.",
+        }
+        for raw, expected in samples.items():
+            with self.subTest(raw=raw):
+                self.assertEqual(self.a.polish(raw), expected)
+
+    def test_intent_prose_and_single_action_are_not_lists(self):
+        samples = ["I am going to cook, I am going to drive my car and I am going to clean the garden.",
+                   "This is the agenda of the day I am going to cook.",
+                   "This is the agenda of the day I will decide whether I will drive.",
+                   "This is the agenda of the day we discussed yesterday.",
+                   "We changed the agenda because I will cook, I will drive, and I will clean."]
+        for raw in samples:
+            with self.subTest(raw=raw):
+                self.assertEqual(self.a.polish(raw), raw)
+
+    def test_intent_agenda_is_one_multiline_clipboard_paste(self):
+        text = self.a.polish("This is our agenda I will cook, I will drive and I will clean.")
+        board, appkit = Mock(), Mock()
+        board.pasteboardItems.return_value = []
+        appkit.NSPasteboard.generalPasteboard.return_value = board
+        appkit.NSPasteboardTypeString = self.a.AppKit.NSPasteboardTypeString
+        with patch.object(self.a, "AppKit", appkit), patch.object(self.a, "press") as press, \
+             patch.object(self.a.threading, "Timer"):
+            self.a.paste(text)
+        board.setString_forType_.assert_called_once_with(
+            "This is our agenda\n\n- I will cook\n- I will drive\n- I will clean.", appkit.NSPasteboardTypeString)
+        press.assert_called_once_with(9, self.a.COMMAND)
+
+    def test_broader_list_wording_and_imperatives(self):
+        samples = {
+            "Here are the things I need to do: cook dinner, drive my car and clean the garden.":
+                "Here are the things I need to do:\n\n- Cook dinner\n- Drive my car\n- Clean the garden.",
+            "Here's what I need to do buy apples, cook dinner and review the report.":
+                "Here's what I need to do\n\n- Buy apples\n- Cook dinner\n- Review the report.",
+            "I have three things to do: cook dinner, drive my car and clean the garden.":
+                "I have three things to do:\n\n- Cook dinner\n- Drive my car\n- Clean the garden.",
+            "For today, my plans are cooking dinner, driving my car and cleaning the garden.":
+                "For today, my plans are\n\n- Cooking dinner\n- Driving my car\n- Cleaning the garden.",
+            "My to-do list: cook dinner and drive my car and clean the garden.":
+                "My to-do list:\n\n- Cook dinner\n- Drive my car\n- Clean the garden.",
+            "Shopping list: apples, milk and bread.":
+                "Shopping list:\n\n- Apples\n- Milk\n- Bread.",
+            "Shopping list: eggs, salt and pepper.":
+                "Shopping list:\n\n- Eggs\n- Salt and pepper.",
+        }
+        for raw, expected in samples.items():
+            with self.subTest(raw=raw):
+                self.assertEqual(self.a.polish(raw), expected)
+
+    def test_abbreviations_and_protected_punctuation_in_lists(self):
+        samples = {
+            'My tasks: call Dr. Lee, read "Draft. Final, approved", and clean the garden. Thanks.':
+                'My tasks:\n\n- Call Dr. Lee\n- Read "Draft. Final, approved"\n- Clean the garden.\n\nThanks.',
+            'My tasks: I will read "Cook, drive" and I will clean the garden.':
+                'My tasks:\n\n- I will read "Cook, drive"\n- I will clean the garden.',
+            "Our agenda: checking costs (food, transport), paying 1,200 dollars and reviewing the budget.":
+                "Our agenda:\n\n- Checking costs (food, transport)\n- Paying 1,200 dollars\n- Reviewing the budget.",
+        }
+        for raw, expected in samples.items():
+            with self.subTest(raw=raw):
+                self.assertEqual(self.a.polish(raw), expected)
+
+    def test_formatted_lists_and_paragraphs_survive_polish(self):
+        samples = ["Our agenda:\n\n- Cooking, cleaning\n- Working on the app.",
+                   "Our agenda:\n\n1. Cooking, cleaning\n2. Working on the app.",
+                   "Hello team.\n\nHere is the report."]
+        for text in samples:
+            self.assertEqual(self.a.polish(text), text)
+
+    def test_quoted_ordinals_and_unbalanced_lists_are_not_reformatted(self):
+        samples = ['She said "first cook dinner, second drive home" to me.',
+                   'My tasks: read "First cook dinner, second drive home", review the report.',
+                   'My tasks: buy food (milk, bread], clean the garden.',
+                   '"My tasks: cook dinner, clean the garden."']
+        for text in samples:
+            if text.startswith('My tasks: read'):
+                self.assertEqual(self.a.polish(text),
+                                 'My tasks:\n\n- Read "First cook dinner, second drive home"\n- Review the report.')
+            else:
+                self.assertEqual(self.a.polish(text), text)
+
+    def test_permission_requests_never_reset_existing_grants(self):
+        for listen, post in [(True, True), (False, True), (True, False), (False, False)]:
+            with patch.object(self.a.Quartz, "CGPreflightListenEventAccess", return_value=listen), \
+                 patch.object(self.a.Quartz, "CGPreflightPostEventAccess", return_value=post), \
+                 patch.object(self.a.Quartz, "CGRequestListenEventAccess") as request_listen, \
+                 patch.object(self.a.Quartz, "CGRequestPostEventAccess") as request_post, \
+                 patch.object(self.a.subprocess, "run") as run:
+                self.assertEqual(self.a.request_keyboard_access(), (listen, post))
+                self.assertEqual(request_listen.call_count, int(not listen))
+                self.assertEqual(request_post.call_count, int(not post))
+                run.assert_not_called()
+
+    def test_settings_state_and_requests_are_safe_during_real_main_startup(self):
+        server_class = Mock()
+        def server(address, handler_class):
+            server_class.handler = handler_class
+            return Mock()
+        def at_startup():
+            handler = self.handler("/api/state")
+            handler.__class__ = server_class.handler
+            with patch.object(self.a, "cloud_key_saved", return_value=False), \
+                 patch.object(self.a, "microphones", return_value=[]):
+                handler.do_GET()
+            self.assertFalse(handler.reply.call_args.args[0]["note"])
+            for route in ("/api/note", "/api/ask-microphone"):
+                handler = self.handler(route)
+                handler.__class__ = server_class.handler
+                handler.do_POST()
+                self.assertEqual(handler.reply.call_args.kwargs["status"], 503)
+                self.assertIn("still starting", handler.reply.call_args.args[0]["error"])
+            raise RuntimeError("test startup boundary")
+        with patch.object(self.a, "ThreadingHTTPServer", side_effect=server), \
+             patch.object(self.a.threading, "Thread") as thread:
+            thread.return_value.start.side_effect = at_startup
+            with self.assertRaisesRegex(RuntimeError, "test startup boundary"):
+                self.a.main()
+
+    def test_bad_history_lines_do_not_hide_valid_entries_or_modify_the_file(self):
+        good = {"ts": 1_700_000_000, "text": "Keep this.", "audio_s": 3.5}
+        bad = ["{unfinished", "[]", '{}', json.dumps(good | {"ts": "yesterday"}),
+               json.dumps(good | {"audio_s": -1}), json.dumps(good | {"ts": float("inf")})]
+        raw = json.dumps(good) + "\n" + "\n".join(bad) + "\n"
+        self.a.HISTORY.write_text(raw)
+        self.assertEqual(self.a.read_history(), [good])
+        self.assertEqual(self.a.HISTORY.read_text(), raw)
+        self.a.HISTORY.write_text("")
+
+    def test_completed_dictation_stays_on_clipboard_if_accessibility_is_missing(self):
+        board, appkit = Mock(), Mock()
+        appkit.NSPasteboard.generalPasteboard.return_value = board
+        appkit.NSPasteboardTypeString = self.a.AppKit.NSPasteboardTypeString
+        with patch.object(self.a, "AppKit", appkit), patch.object(self.a, "keyboard_access", return_value=(True, False)), \
+             patch.object(self.a, "paste") as paste:
+            self.assertFalse(self.a.deliver("- Cook dinner\n- Drive home"))
+        board.setString_forType_.assert_called_once_with("- Cook dinner\n- Drive home", appkit.NSPasteboardTypeString)
+        paste.assert_not_called()
+        self.assertIn("clipboard", self.a.status["delivery"])
+
+    def test_granted_accessibility_uses_paste_and_clears_delivery_warning(self):
+        with patch.object(self.a, "keyboard_access", return_value=(True, True)), patch.object(self.a, "paste") as paste:
+            self.assertTrue(self.a.deliver("Hello"))
+        paste.assert_called_once_with("Hello")
+        self.assertEqual(self.a.status["delivery"], "")
+
+    def test_failed_local_warmup_returns_with_visible_error_instead_of_killing_worker(self):
+        local = Mock(side_effect=OSError("offline"))
+        self.a.status["loading"] = True
+        self.a.load_local_speech(local)
+        self.assertFalse(self.a.status["loading"])
+        self.assertIn("could not load", self.a.status["speech_error"])
+        local.reset_mock(side_effect=True)
+        self.a.load_local_speech(local)
+        self.assertEqual(self.a.status["speech_error"], "")
+
+    def test_transcribed_comma_introductions_are_recognized(self):
+        samples = {
+            "I have three things to do, cook dinner, drive my car and clean the garden.":
+                "I have three things to do,\n\n- Cook dinner\n- Drive my car\n- Clean the garden.",
+            "My tasks, I will cook fish and chips, I will drive and I will clean.":
+                "My tasks,\n\n- I will cook fish and chips\n- I will drive\n- I will clean.",
+            "My tasks, call Dr. Lee, review the report and clean the garden.":
+                "My tasks,\n\n- Call Dr. Lee\n- Review the report\n- Clean the garden.",
+        }
+        for raw, expected in samples.items():
+            self.assertEqual(self.a.polish(raw), expected)
+
+    def test_local_noun_inference_preserves_verbatim_items_and_compounds(self):
+        for raw, reply, expected in [
+            ("Shopping list apples milk and bread", '["apples", "milk", "bread"]',
+             "Shopping list\n\n- Apples\n- Milk\n- Bread"),
+            ("Shopping list eggs salt and pepper", '["eggs", "salt and pepper"]',
+             "Shopping list\n\n- Eggs\n- Salt and pepper"),
+            ("Shopping list banana bread whole milk and eggs.", '["banana bread", "whole milk", "eggs"]',
+             "Shopping list\n\n- Banana bread\n- Whole milk\n- Eggs"),
+        ]:
+            with patch.object(self.a, "llm", return_value=reply) as llm:
+                self.assertEqual(self.a.polish(raw), expected)
+                llm.assert_called_once()
+
+    def test_noun_model_cannot_invent_drop_reorder_or_split_compound_items(self):
+        raw = "Shopping list eggs salt and pepper"
+        for reply in ['["eggs", "insecticide"]', '["eggs", "pepper"]', '["pepper", "eggs"]',
+                      '["eggs", "salt", "pepper"]', '["egg", "salt and pepper"]', '{}', 'not json']:
+            with patch.object(self.a, "llm", return_value=reply):
+                self.assertEqual(self.a.polish(raw), raw)
+        with patch.object(self.a, "llm", side_effect=OSError("unavailable")):
+            self.assertEqual(self.a.polish(raw), raw)
+
+    def test_clear_lists_and_ordinary_prose_never_call_noun_model(self):
+        with patch.object(self.a, "llm") as llm:
+            self.a.polish("Shopping list: apples, milk and bread.")
+            self.a.polish("My tasks: cook dinner and drive home.")
+            self.a.polish("I enjoy apples, milk and bread.")
+            llm.assert_not_called()
+
     def test_openrouter_failure_and_missing_key_use_local(self):
         self.config(speech_provider="openrouter")
         with patch.object(self.a, "cloud_key", return_value=""), patch.object(self.a, "hear") as hear:
