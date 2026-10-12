@@ -63,8 +63,10 @@ EDIT_INTENT = re.compile(r"\b(undo|scratch|delete|remove|erase|cancel|never ?min
                          r"change|rewrite|rephrase|shorten|expand|summari[sz]e|translate|turn|convert|add|replace|"
                          r"format|simplify|capitali[sz]e|lowercase|uppercase|punctuate|split|join|shorter|longer|"
                          r"formal|casual|polite|concise|too|grammar|spelling|punctuation|bullets?)\b", re.I)
-FILLERS = re.compile(r"\b(?:u+h*m+|u+h+|e+r+m*|h+m+|m{2,})\b[,…]*\s*", re.I)  # um, uh, uhm, er, erm, hmm, mm
-STUTTER = re.compile(r"\b(\w+)(?:,?\s+\1\b){2,}|\b(I)(?:,?\s+I\b)+", re.I)  # "the the the", "I I"
+# um, uh, uhm, er, erm, hmm, mm; but not an acronym (ER), a hyphenated word (mm-hmm) or a quoted one ("um")
+FILLERS = re.compile(r"(?<![-\w'’\"“])(?-i:(?![A-Z]{2,}\b))(?:u+h*m+|u+h+|e+r+m*|h+m+|m{2,})\b(?![-'’\"”])[,…]*\s*", re.I)
+# "the the the", "I I"; letters only, so the digits of a spoken number ("5 5 5") are kept
+STUTTER = re.compile(r"\b([^\W\d_]+)(?:,?\s+\1\b){2,}|\b(I)(?:,?\s+I\b)+", re.I)
 WHISPER = "mlx-community/whisper-large-v3-turbo"
 # The one text model, as a Hugging Face repository; there is no choice in Settings. Score a candidate with bench.py
 # before changing it: the 5-bit build passes all 42 checks, the 4-bit one misses two.
@@ -765,6 +767,11 @@ def clean(raw):
     return out if out and len(out) < 2 * len(raw) + 20 else raw
 
 
+def spoken(raw):
+    """False for a transcript with no letter or digit: Whisper writes "!" or "." for a short noise."""
+    return bool(re.search(r"\w", raw))
+
+
 def tidy(raw):
     """Cleanup by rule, with no model: drop filler sounds and stutters, then repair spacing and the capital."""
     text = STUTTER.sub(lambda match: match.group(1) or match.group(2), FILLERS.sub("", raw))
@@ -831,12 +838,18 @@ def spoken_list(text):
     masked = list_mask(text)
     if masked is None:
         return text
-    for match in re.finditer(ordinal + r"(?:[\s,]+" + ordinal + r")*", masked, re.I):
+    for match in re.finditer(ordinal + r"(?:[\s,]+" + ordinal + r")*(?:\s+of\s+all\b)?", masked, re.I):
         after = text[match.end():].lstrip(" ,:;-\t\n")
+        # "the first quarter", "my second job", "at first", "finished second": not an item label.
+        if re.search(r"\b(?:the|an?|my|our|your|his|her|their|its|this|that|every|each|at|on|in|for|of|"
+                     r"finish(?:ed|es)?|came|comes?|placed|ranked|was|is|went|goes)\s+$",
+                     masked[:match.start()], re.I):
+            continue
         # Ordinary ordinal adjectives and idioms are content, not item labels.
         if re.match(r"(?:time|times|thoughts?|seconds?|minutes?|hours?|days?|weeks?|months?|years?|"
                     r"place|prize|round|gear|hand|language|person|cousin|floor|draft|version|edition|"
-                    r"chapter|page|row|column|degree|chance|opinion|half|class|aid|things)\b", after, re.I):
+                    r"chapter|page|row|column|degree|chance|opinion|half|class|aid|things?|helpings?|steps?|"
+                    r"points?|one|part|option|item|attempt|try|look|glance)\b", after, re.I):
             continue
         if not after or not re.match(r"\w", after):
             continue
@@ -1757,7 +1770,7 @@ def main():
         # Whisper invents words from silence; it also reports how sure it is that nobody spoke
         invented = len(raw.split()) > 6 * len(audio) / RATE + 3  # nobody speaks six words a second
         silent = result["segments"] and all(seg["no_speech_prob"] > 0.6 for seg in result["segments"])  # Whisper only
-        if not raw or invented or silent:
+        if not spoken(raw) or invented or silent:
             print("skipped: no speech heard")
             return
         if as_note:  # ponytail: one voice, no speaker labels; needs a diarisation model to tell people apart

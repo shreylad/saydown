@@ -381,6 +381,36 @@ class SpeechTests(unittest.TestCase):
             with self.subTest(raw=raw):
                 self.assertEqual(self.a.polish(raw), raw)
 
+    def test_ordinals_used_as_adjectives_or_idioms_stay_prose(self):
+        samples = ["At first I was unsure, but on second look it was fine.",
+                   "The first quarter was strong and the second quarter was weak.",
+                   "My first job was in Austin. My second job was in Dallas.",
+                   "Our first customer paid late, and our second customer never paid.",
+                   "He finished first, she finished second, and I finished third.",
+                   "First we eat, then we talk. Second helpings are allowed.",
+                   "First thing tomorrow, call Sam. Second thing, email Bob."]
+        for raw in samples:
+            with self.subTest(raw=raw):
+                self.assertEqual(self.a.polish(raw), raw)
+        self.assertEqual(self.a.polish("First of all, thank you. Second of all, I am sorry."),
+                         "1. Thank you.\n2. I am sorry.")
+
+    def test_tidy_keeps_real_words_that_look_like_fillers(self):
+        samples = {"I was in the ER.": "I was in the ER.",
+                   "Mm-hmm, I agree.": "Mm-hmm, I agree.",
+                   'He said "um" twice.': 'He said "um" twice.',
+                   "Call 5 5 5 1 2 3 4 now.": "Call 5 5 5 1 2 3 4 now.",
+                   "Um, I think the the the plan is fine.": "I think the plan is fine."}
+        for raw, expected in samples.items():
+            with self.subTest(raw=raw):
+                self.assertEqual(self.a.tidy(raw), expected)
+
+    def test_punctuation_only_transcripts_are_not_speech(self):
+        for raw in ("!", ".", "...", "?!", "", " - "):
+            self.assertFalse(self.a.spoken(raw), raw)
+        for raw in ("Hi.", "5", "é"):
+            self.assertTrue(self.a.spoken(raw), raw)
+
     def test_ordinals_inside_items_are_preserved(self):
         raw = "First review the first draft on the second floor. Second send the second version."
         self.assertEqual(self.a.polish(raw),
