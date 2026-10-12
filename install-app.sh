@@ -10,7 +10,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 RELEASE=""; [ "${1:-}" = "--release" ] && RELEASE=1
 if [ -n "$RELEASE" ]; then APP="$HERE/dist/Saydown.app"; else APP="/Applications/Saydown.app"; fi
 if [ -z "$RELEASE" ] && [ -x "$APP/Contents/Resources/python/bin/python3" ]; then
-    "$APP/Contents/Resources/python/bin/python3" "$HERE/update_app.py" --app "$APP"
+    "$APP/Contents/Resources/python/bin/python3" -B "$HERE/update_app.py" --app "$APP"
     exit 0
 fi
 UV="$(command -v uv)" || { echo "uv is not installed: https://docs.astral.sh/uv/"; exit 1; }
