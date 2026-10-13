@@ -85,15 +85,6 @@ class SpeechTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     self.a.valid_settings(body)
 
-    def test_existing_key_opt_in_migrates_but_explicit_local_wins(self):
-        self.a.SETTINGS.write_text('{"language":"en"}')
-        self.a._cached[:] = [None, None]
-        with patch.object(self.a, "cloud_key_saved", return_value=True):
-            self.assertEqual(self.a.settings()["speech_model"], "gpt-4o-mini-transcribe")
-            self.assertEqual(self.a.settings()["speech_provider"], "openai")
-            self.config(speech_provider="local")
-            self.assertEqual(self.a.settings()["speech_provider"], "local")
-
     def test_multipart_contains_model_language_dictionary_and_real_wav(self):
         for model in self.a.SPEECH_MODELS:
             response = io.BytesIO(b'{"text":"hello"}')
@@ -752,29 +743,7 @@ class SpeechTests(unittest.TestCase):
         for raw, expected in samples.items():
             self.assertEqual(self.a.polish(raw), expected)
 
-    def test_local_noun_inference_preserves_verbatim_items_and_compounds(self):
-        for raw, reply, expected in [
-            ("Shopping list apples milk and bread", '["apples", "milk", "bread"]',
-             "Shopping list\n\n- Apples\n- Milk\n- Bread"),
-            ("Shopping list eggs salt and pepper", '["eggs", "salt and pepper"]',
-             "Shopping list\n\n- Eggs\n- Salt and pepper"),
-            ("Shopping list banana bread whole milk and eggs.", '["banana bread", "whole milk", "eggs"]',
-             "Shopping list\n\n- Banana bread\n- Whole milk\n- Eggs"),
-        ]:
-            with patch.object(self.a, "llm", return_value=reply) as llm:
-                self.assertEqual(self.a.polish(raw), expected)
-                llm.assert_called_once()
-
-    def test_noun_model_cannot_invent_drop_reorder_or_split_compound_items(self):
-        raw = "Shopping list eggs salt and pepper"
-        for reply in ['["eggs", "insecticide"]', '["eggs", "pepper"]', '["pepper", "eggs"]',
-                      '["eggs", "salt", "pepper"]', '["egg", "salt and pepper"]', '{}', 'not json']:
-            with patch.object(self.a, "llm", return_value=reply):
-                self.assertEqual(self.a.polish(raw), raw)
-        with patch.object(self.a, "llm", side_effect=OSError("unavailable")):
-            self.assertEqual(self.a.polish(raw), raw)
-
-    def test_clear_lists_and_ordinary_prose_never_call_noun_model(self):
+    def test_lists_and_ordinary_prose_never_call_the_model(self):
         with patch.object(self.a, "llm") as llm:
             self.a.polish("Shopping list: apples, milk and bread.")
             self.a.polish("My tasks: cook dinner and drive home.")

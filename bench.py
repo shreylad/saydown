@@ -4,8 +4,7 @@ Runs every check without stopping at the first failure and prints pass counts an
 """
 import sys, time
 import dictate
-model = sys.argv[1]; real = dictate.settings
-dictate.settings = lambda: real() | {"model": model}
+model = dictate.TEXT_MODEL = sys.argv[1]
 two = "The launch moves to March. Please tell the vendors today."
 results, times = [], {}
 def check(group, name, fn, ok):
@@ -17,7 +16,7 @@ def check(group, name, fn, ok):
     try: good = bool(ok(out))
     except Exception: pass
     results.append((group, name, good, str(out).replace("\n", " / ")[:110]))
-dictate.paths[model] = dictate.fetch(model, lambda *a, **k: None)
+for repo in (model, dictate.EMBED_MODEL): dictate.paths[repo] = dictate.fetch(repo, lambda *a, **k: None)
 dictate.clean("warm up")
 for raw, want, unwanted in [
     ("um so send the report on tuesday no wait wednesday", "Wednesday", "Tuesday"),
@@ -41,13 +40,14 @@ check("rewrite", "meeting notes", lambda: dictate.rewrite(meeting, "meeting"), l
 check("edit", "delete last sentence", lambda: dictate.edit(two, "delete the last sentence"), lambda o: "March" in o and "vendors" not in o)
 check("edit", "bullet points", lambda: dictate.edit(meeting, "turn that into bullet points"), lambda o: o.count("\n") >= 3 and "Priya" in o)
 check("edit", "translate to Spanish", lambda: dictate.edit(two, "translate this to Spanish"), lambda o: "marzo" in o.lower())
-for said, want in [("make that shorter","EDIT"),("fix the grammar","EDIT"),("undo that","UNDO"),("scratch that","UNDO"),("never mind","UNDO"),("See you at five.","TYPE"),
+for said, want in [("make that shorter","EDIT"),("fix the grammar","EDIT"),("undo that","UNDO"),("scratch that","UNDO"),("never mind","UNDO"),("See you at five.","TYPE"),("Can you make the report shorter by Friday?","TYPE"),
  ("Thanks, talk soon.","TYPE"),("Please make the deck shorter by Tuesday.","TYPE"),("Fix the checkout bug today.","TYPE"),("Delete the last sentence.","EDIT"),
  ("Make it more confident.","EDIT"),("Turn that into bullet points.","EDIT"),("I think we should delete the old account.","TYPE"),("Okay sounds good.","TYPE"),
  ("Please send me the file.","TYPE"),("Make this more professional.","EDIT"),("Rewrite this as an email.","EDIT"),("Send the invoice to Priya.","TYPE"),
  ("Make sure the report is shorter.","TYPE"),("Translate that to Spanish.","EDIT"),("Delete that.","UNDO"),("Let's make it happen.","TYPE")]:
     check("command", said, lambda s=said: dictate.command(s, two), lambda o, w=want: o == w)
 old = [{"ts": 1791000000.0, "text": "Pricing: we go with the freemium plan."}, {"ts": 1791086400.0, "text": "Remind me to call the dentist."}]
+check("ask", "by meaning", lambda: dictate.by_meaning(old + [{"ts": 1791172800.0, "text": "The cat sat on the mat."}], "how much will we charge", cache=None)[0]["text"], lambda o: o.startswith("Pricing"))
 check("ask", "pricing plan", lambda: dictate.ask("Which pricing plan did I pick?", old, rank=dictate.by_keywords)["answer"], lambda o: "freemium" in o.lower() and "[1]" in o)
 check("ask", "not in history", lambda: dictate.ask("What is my flight number?", old, rank=dictate.by_keywords)["answer"], lambda o: len(o) < 200 and not any(c.isdigit() for c in __import__("re").sub(r"\[[\d, ]+\]", "", o)))
 print(f"===== {model}: {sum(r[2] for r in results)}/{len(results)} passed")

@@ -40,7 +40,7 @@ Requirements: an Apple Silicon Mac (16 GB of memory is enough), and [uv](https:/
 uv run dictate.py
 ```
 
-The first run downloads the Whisper model (about 1.6 GB) and the AI models (about 6 GB). uv installs the Python dependencies on its own.
+The first run downloads the Whisper model (about 1.6 GB) and the AI models (about 6 GB). uv installs the Python dependencies on its own. Run this way, the Saydown window opens as a page in your browser.
 
 macOS will ask the app you launch it from (Terminal, iTerm, ...) for three permissions under System Settings → Privacy & Security. Grant all three, then start it again:
 
@@ -50,15 +50,13 @@ macOS will ask the app you launch it from (Terminal, iTerm, ...) for three permi
 | Input Monitoring | Seeing the hotkey |
 | Accessibility | Pasting at your cursor |
 
-### As an app, while developing
+### Updating the installed app
 
 ```sh
 ./install-app.sh
 ```
 
-This builds `Saydown.app` in your Applications folder, so you can start it from Launchpad or Spotlight with no terminal. Its window opens with it and it stays in the Dock; opening it again, or clicking its Dock icon, brings the window back. Quit from the Dock, with ⌘Q, or from the Settings tab. Add it under System Settings → General → Login Items to start it when you log in.
-
-The app has its own identity, so macOS asks for Microphone, Accessibility, and Input Monitoring again, this time for Saydown; grant them, quit, and reopen. It is a small launcher tied to this folder and your `uv` install, not a self-contained download: run the script again if you move the folder. It needs Apple's Command Line Tools for the compiler. The log is at `~/Library/Logs/saydown.log`.
+This copies the code in this folder into the `Saydown.app` already in your Applications folder; restart Saydown to use it. Nothing is rebuilt or re-signed, so macOS does not ask for permissions again. With no app installed yet, build one first with `--release` (below) and drag it to Applications. The log is at `~/Library/Logs/saydown.log`.
 
 ### Building the download
 
@@ -92,9 +90,9 @@ If Accessibility is unavailable at delivery time, Saydown keeps the completed di
 
 ## Updating this personal installation
 
-For a standalone installed app, `./install-app.sh` now calls `update_app.py` rather than rebuilding the app. The initial migration installs a stable bundled bootstrap and needs one final permission renewal. Later Python/UI updates are stored as versioned files under `~/Library/Application Support/Saydown/Runtime`, selected by an atomic pointer, without changing or re-signing the app bundle. The bundled Python and native launcher remain in the app. Rebuilding either of those, or changing the bootstrap, is a separate migration and can require renewed permissions.
+`./install-app.sh` calls `update_app.py` rather than rebuilding the app. Python/UI updates are stored as versioned files under `~/Library/Application Support/Saydown/Runtime`, selected by an atomic pointer, without changing or re-signing the app bundle. The bundled Python and native launcher remain in the app. Changing either of those, or `runtime_bootstrap.py`, needs a new `--release` build and can require renewed permissions; the updater refuses to run when the bootstrap differs.
 
-Each runtime has a manifest of file hashes and must match the bundled fallback version. An incomplete, corrupt, or incompatible runtime falls back to the bundled implementation. Updates retain the previous runtime and write a receipt under `Backups`; installation failures restore the previous pointer and bundle files. Startup never runs `tccutil reset` automatically. Permission grants remain under the user's control; if an old grant is stale, remove and re-add Saydown manually in System Settings.
+Each runtime has a manifest of file hashes and must match the bundled fallback version. An incomplete, corrupt, or incompatible runtime falls back to the bundled implementation. Updates retain the previous runtimes, so pointing `Runtime/current.json` back at one undoes an update; an installation failure restores the previous pointer. Startup never runs `tccutil reset` automatically. Permission grants remain under the user's control; if an old grant is stale, remove and re-add Saydown manually in System Settings.
 
 Regression checks: `python -B -m unittest test_speech test_runtime -q` with the app's bundled Python and site-packages. Keep `-B`: without it Python writes cache files into the app, which invalidates its signature and blocks the next update. `bench_dictation.py --output /path/to/report-directory` exercises local Whisper and formatting on synthetic English TTS fixtures, using the cached model and isolated settings. It does not use the microphone or paid APIs. Synthetic results do not establish accuracy for accents, background noise, or arbitrary real recordings.
 
@@ -248,13 +246,14 @@ Your history, dictionary and settings are plain files in `~/Library/Application 
 
 The logic is in `dictate.py`; the window's layout is in `ui.html`.
 
-## Testing the cleanup prompt
+## Testing
 
 ```sh
 uv run dictate.py --test
+uv run --with-requirements <(uv export --script dictate.py) bench.py mlx-community/gemma-4-e4b-it-5bit
 ```
 
-This runs a list of raw transcripts through the cleanup model and checks each result. When the tool gets one of your dictations wrong, add it to the `cases` list at the bottom of `dictate.py` so a later prompt change cannot quietly break it again.
+The first checks the settings and the text rules in about a second, with no model. The second runs raw transcripts, rewrites, edits, voice commands and Ask through the text model and prints what passed. When the tool gets one of your dictations wrong, add it to the cleanup list in `bench.py` so a later prompt change cannot quietly break it again.
 
 ## Known limits
 

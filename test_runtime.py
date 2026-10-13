@@ -20,14 +20,10 @@ class RuntimeTests(unittest.TestCase):
         self.app = self.root / 'Saydown.app'
         self.resources = self.app / 'Contents/Resources'
         self.resources.mkdir(parents=True)
-        (self.app / 'Contents/MacOS').mkdir()
-        (self.app / 'Contents/_CodeSignature').mkdir()
         (self.app / 'Contents/Info.plist').write_bytes(plistlib.dumps({'CFBundleIdentifier': 'io.github.saydown'}))
-        (self.resources / 'dictate.py').write_text('print("old")\n')
+        (self.resources / 'dictate.py').write_bytes(Path(boot.__file__).read_bytes())
+        (self.resources / 'dictate_bundled.py').write_text('print("old")\n')
         (self.resources / 'ui.html').write_text('old UI')
-        (self.app / 'Contents/MacOS/Saydown').write_bytes(b'old executable')
-        (self.app / 'Contents/MacOS/Saydown').chmod(0o755)
-        (self.app / 'Contents/_CodeSignature/CodeResources').write_bytes(b'old signature')
         self.stage = self.root / 'stage'
         self.stage.mkdir()
         (self.stage / 'runtime_bootstrap.py').write_bytes(Path(boot.__file__).read_bytes())
@@ -44,17 +40,19 @@ class RuntimeTests(unittest.TestCase):
         return {str(p.relative_to(self.app)): (p.read_bytes(), p.stat().st_mode)
                 for p in self.app.rglob('*') if p.is_file()}
 
-    def test_migration_then_routine_update_leaves_every_bundle_file_unchanged(self):
-        first, run = self.install()
-        self.assertTrue(first['bundle_changed'])
-        self.assertEqual(sum('--sign' in c.args[0] for c in run.call_args_list), 1)
+    def test_update_leaves_every_bundle_file_unchanged_and_never_signs(self):
         before = self.snapshot()
-        (self.stage / 'dictate.py').write_text('print("next")\n')
-        second, run = self.install()
-        self.assertFalse(second['bundle_changed'])
+        _, run = self.install()
         self.assertEqual(before, self.snapshot())
         self.assertFalse(any('--sign' in c.args[0] for c in run.call_args_list))
-        self.assertEqual(boot.runtime_path(self.resources, self.data).read_text(), 'print("next")\n')
+        self.assertEqual(boot.runtime_path(self.resources, self.data).read_text(), 'print("new")\n')
+
+    def test_changed_bootstrap_is_refused_before_changes(self):
+        (self.stage / 'runtime_bootstrap.py').write_text('print("another bootstrap")\n')
+        with patch.object(updater.subprocess, 'run'):
+            with self.assertRaises(ValueError):
+                updater.update(self.app, self.stage, self.data)
+        self.assertFalse((self.data / 'Runtime').exists())
 
     def test_valid_runtime_is_selected_and_older_generation_is_retained(self):
         first, _ = self.install()
@@ -99,12 +97,10 @@ class RuntimeTests(unittest.TestCase):
         code.symlink_to(self.stage / 'dictate.py')
         self.assertEqual(boot.runtime_path(self.resources, self.data), self.resources / 'dictate_bundled.py')
 
-    def test_first_migration_failure_restores_app_bytes_modes_and_pointer(self):
-        before = self.snapshot()
+    def test_failed_first_update_leaves_no_pointer(self):
         with patch.object(updater.subprocess, 'run', side_effect=[None, subprocess.CalledProcessError(1, 'codesign')]):
             with self.assertRaises(subprocess.CalledProcessError):
                 updater.update(self.app, self.stage, self.data)
-        self.assertEqual(self.snapshot(), before)
         self.assertFalse((self.data / 'Runtime/current.json').exists())
 
     def test_failed_routine_update_restores_previous_pointer_and_code(self):

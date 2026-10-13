@@ -249,6 +249,16 @@
         <span class="control"><input type="range" id="alpha" min="10" max="100" step="5"></span>
       </label>
       <label class="field">
+        <span>Pill position</span>
+        <small>Which edge of the screen the pill sits at.</small>
+        <span class="control"><select id="pill-position">
+          <option value="bottom">Bottom</option>
+          <option value="top">Top</option>
+          <option value="left">Left</option>
+          <option value="right">Right</option>
+        </select></span>
+      </label>
+      <label class="field">
         <span>Save history</span>
         <small>Keep a local list of what you dictate. Turning this off stops new entries.</small>
         <span class="control"><input type="checkbox" id="save-history"></span>
@@ -538,6 +548,7 @@ function renderSettings() {
   fill($("#language"), Object.entries(state.languages), state.settings.language);
   $("#alpha").value = Math.round(state.settings.idle_alpha * 100);
   $("#alpha-value").textContent = "(" + Math.round(state.settings.idle_alpha * 100) + "%)";
+  $("#pill-position").value = state.settings.pill_position;
   $("#save-history").checked = state.settings.save_history;
   $("#voice-commands").checked = state.settings.voice_commands;
 }
@@ -659,6 +670,7 @@ $("#speech-key-remove").onclick = () => saveSpeech("/api/speech-key", {key: "", 
 for (const key of ["microphone", "language"]) $("#" + key).onchange = (event) => post("/api/settings", {[key]: event.target.value});
 $("#alpha").oninput = (event) => $("#alpha-value").textContent = "(" + event.target.value + "%)";
 $("#alpha").onchange = (event) => post("/api/settings", {idle_alpha: event.target.value / 100});
+$("#pill-position").onchange = (event) => post("/api/settings", {pill_position: event.target.value});
 $("#save-history").onchange = (event) => post("/api/settings", {save_history: event.target.checked});
 $("#voice-commands").onchange = (event) => post("/api/settings", {voice_commands: event.target.checked});
 $("#note").onclick = () => post("/api/note");

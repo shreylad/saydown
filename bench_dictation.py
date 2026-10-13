@@ -51,7 +51,7 @@ def run(output):
         with patch.object(Path, 'home', return_value=Path(isolated)):
             spec.loader.exec_module(app)
         app.SETTINGS.write_text(json.dumps(app.DEFAULTS | {'language': 'en'}))
-        text_repo = app.DEFAULTS['model']
+        text_repo = app.TEXT_MODEL
         text_snapshots = Path.home() / '.cache/huggingface/hub' / ('models--' + text_repo.replace('/', '--')) / 'snapshots'
         text_model = next((p for p in sorted(text_snapshots.glob('*')) if (p / 'config.json').exists()), None)
         if text_model:

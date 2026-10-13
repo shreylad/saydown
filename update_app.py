@@ -1,7 +1,7 @@
-"""Update the existing personal Saydown app without changing its signature on routine updates.
+"""Update the existing personal Saydown app without changing its signature.
 
 Run: the app's bundled Python update_app.py (then restart Saydown).
-The first migration installs a stable bootstrap and requires one final permission renewal.
+The new code goes beside the user's data, where the app's bundled bootstrap finds it; the app itself is not touched.
 """
 import argparse
 import datetime
@@ -30,40 +30,19 @@ def update(app, stage, data):
             raise ValueError('This updater only supports the existing Saydown app.')
     subprocess.run(['codesign', '--verify', '--strict', str(app)], check=True)
     resources = app / 'Contents/Resources'
-    bootstrap = (stage / 'runtime_bootstrap.py').read_bytes()
-    compile(bootstrap, str(stage / 'runtime_bootstrap.py'), 'exec')
-    migrate = (resources / 'dictate.py').read_bytes() != bootstrap
+    if (resources / 'dictate.py').read_bytes() != (stage / 'runtime_bootstrap.py').read_bytes():
+        # the bootstrap is inside the signed app, so replacing it means a new build and renewed permissions
+        raise ValueError('runtime_bootstrap.py differs from the one inside the app: rebuild it with ./install-app.sh --release.')
     runtime = {name: (stage / name).read_bytes() for name in ('dictate.py', 'ui.html')}
     compile(runtime['dictate.py'], str(stage / 'dictate.py'), 'exec')
     stamp = datetime.datetime.now().strftime('%Y%m%d-%H%M%S') + '-' + uuid.uuid4().hex[:8]
-    backup = data / 'Backups' / ('runtime-' + stamp)
-    backup.mkdir(parents=True)
     root = data / 'Runtime'
-    root.mkdir(exist_ok=True)
+    root.mkdir(parents=True, exist_ok=True)
     pointer = root / 'current.json'
     old_pointer = pointer.read_bytes() if pointer.exists() else None
-    if old_pointer is not None:
-        (backup / 'current.json').write_bytes(old_pointer)
-    changed = ('Contents/Resources/dictate.py', 'Contents/Resources/dictate_bundled.py',
-               'Contents/Resources/ui.html', 'Contents/MacOS/Saydown', 'Contents/_CodeSignature/CodeResources')
-    saved = {}
-    if migrate:
-        for name in changed:
-            path = app / name
-            saved[name] = path.read_bytes() if path.exists() else None
-            if saved[name] is not None:
-                destination = backup / name
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(path, destination)
-    generation = root / stamp
+    generation = root / stamp  # earlier generations stay, so pointing current.json back at one undoes an update
     generation.mkdir()
     try:
-        if migrate:
-            atomic_write(resources / 'dictate_bundled.py', runtime['dictate.py'])
-            atomic_write(resources / 'ui.html', runtime['ui.html'])
-            atomic_write(resources / 'dictate.py', bootstrap)
-            subprocess.run(['codesign', '--force', '--sign', '-', str(app)], check=True)
-            subprocess.run(['codesign', '--verify', '--strict', str(app)], check=True)
         base = hashlib.sha256((resources / 'dictate_bundled.py').read_bytes()).hexdigest()
         for name, contents in runtime.items():
             (generation / name).write_bytes(contents)
@@ -77,20 +56,9 @@ def update(app, stage, data):
             pointer.unlink(missing_ok=True)
         else:
             atomic_write(pointer, old_pointer)
-        if migrate:
-            for name, contents in saved.items():
-                if contents is None:
-                    (app / name).unlink(missing_ok=True)
-                else:
-                    atomic_write(app / name, contents)
-                    if name == 'Contents/MacOS/Saydown':
-                        os.chmod(app / name, (backup / name).stat().st_mode)
         shutil.rmtree(generation)
         raise
-    receipt = {'app': str(app), 'runtime': str(generation), 'bundle_changed': migrate,
-               'backup': str(backup)}
-    (backup / 'receipt.json').write_text(json.dumps(receipt, indent=2) + '\n')
-    return receipt
+    return {'app': str(app), 'runtime': str(generation)}
 
 
 if __name__ == '__main__':
