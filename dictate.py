@@ -1099,8 +1099,8 @@ _ax.AXUIElementCopyAttributeValue.argtypes = [ctypes.c_void_p, ctypes.c_void_p, 
 _ax.AXUIElementSetAttributeValue.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
 _ax.AXUIElementCopyAttributeValue.restype = _ax.AXUIElementSetAttributeValue.restype = ctypes.c_int32
 _ax.CFRelease.argtypes = [ctypes.c_void_p]
-TEXT_ROLES = {"AXTextField", "AXTextArea", "AXComboBox"}
-AX_NO_VALUE = -25212  # kAXErrorNoValue: nothing has the keyboard focus
+# browsers often report a focused text box only as the page itself (AXWebArea)
+TEXT_ROLES = {"AXTextField", "AXTextArea", "AXComboBox", "AXWebArea"}
 
 
 def ax_get(element, name):
@@ -1109,7 +1109,8 @@ def ax_get(element, name):
 
 
 def typing_spot():
-    """True when the keyboard focus is somewhere text can go, False when it is nowhere, None when macOS will not say."""
+    """True when the keyboard focus is somewhere text can go, False when macOS names something that is not a text
+    box, None when macOS will not say."""
     front = AppKit.NSWorkspace.sharedWorkspace().frontmostApplication()
     if front:  # Electron apps (Slack, VS Code, Claude) describe their text boxes only once asked to
         app = _ax.AXUIElementCreateApplication(front.processIdentifier())
@@ -1119,8 +1120,9 @@ def typing_spot():
     system = _ax.AXUIElementCreateSystemWide()
     error, focused = ax_get(system, "AXFocusedUIElement")
     _ax.CFRelease(system)
-    if error:
-        return False if error == AX_NO_VALUE else None
+    if error:  # Chrome and Electron apps often answer "no focus" while a text box is focused, so paste anyway
+        print(f"focus unknown (AX error {error}), pasting")
+        return None
     error, name = ax_get(focused, "AXRole")
     role = ""
     if not error:
