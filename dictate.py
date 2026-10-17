@@ -1086,15 +1086,66 @@ def paste(text):
     threading.Timer(0.4, restore).start()  # after the app in front has read the clipboard for the paste
 
 
-def deliver(text):
-    """If Accessibility is unavailable, keep the completed dictation on the clipboard for manual paste."""
-    if keyboard_access()[1]:
-        paste(text)
-        status["delivery"] = ""
-        return True
+def copy(text):
     board = AppKit.NSPasteboard.generalPasteboard()
     board.clearContents()
     board.setString_forType_(text, AppKit.NSPasteboardTypeString)
+
+
+_ax = ctypes.cdll.LoadLibrary("/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices")
+_ax.AXUIElementCreateSystemWide.restype = _ax.AXUIElementCreateApplication.restype = ctypes.c_void_p
+_ax.AXUIElementCreateApplication.argtypes = [ctypes.c_int32]
+_ax.AXUIElementCopyAttributeValue.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)]
+_ax.AXUIElementSetAttributeValue.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
+_ax.AXUIElementCopyAttributeValue.restype = _ax.AXUIElementSetAttributeValue.restype = ctypes.c_int32
+_ax.CFRelease.argtypes = [ctypes.c_void_p]
+TEXT_ROLES = {"AXTextField", "AXTextArea", "AXComboBox"}
+AX_NO_VALUE = -25212  # kAXErrorNoValue: nothing has the keyboard focus
+
+
+def ax_get(element, name):
+    value, key = ctypes.c_void_p(), AppKit.NSString.stringWithString_(name).nsstring()
+    return _ax.AXUIElementCopyAttributeValue(element, objc.pyobjc_id(key), ctypes.byref(value)), value.value
+
+
+def typing_spot():
+    """True when the keyboard focus is somewhere text can go, False when it is nowhere, None when macOS will not say."""
+    front = AppKit.NSWorkspace.sharedWorkspace().frontmostApplication()
+    if front:  # Electron apps (Slack, VS Code, Claude) describe their text boxes only once asked to
+        app = _ax.AXUIElementCreateApplication(front.processIdentifier())
+        key = AppKit.NSString.stringWithString_("AXManualAccessibility").nsstring()
+        _ax.AXUIElementSetAttributeValue(app, objc.pyobjc_id(key), ctypes.c_void_p.in_dll(_ax, "kCFBooleanTrue"))
+        _ax.CFRelease(app)
+    system = _ax.AXUIElementCreateSystemWide()
+    error, focused = ax_get(system, "AXFocusedUIElement")
+    _ax.CFRelease(system)
+    if error:
+        return False if error == AX_NO_VALUE else None
+    error, name = ax_get(focused, "AXRole")
+    role = ""
+    if not error:
+        role = str(objc.objc_object(c_void_p=name))
+        _ax.CFRelease(name)
+    # custom text views (some terminals and editors) have another role but still report a text selection
+    selection = role in TEXT_ROLES or ax_get(focused, "AXSelectedTextRange")[0] == 0
+    _ax.CFRelease(focused)
+    if not selection:
+        print(f"nowhere to type: focus is on {role or 'something unnamed'}")
+    return selection
+
+
+def deliver(text, card):
+    """Paste at the cursor. With no text box in focus, or without Accessibility, leave it on the clipboard; with no
+    text box, card(text) also shows it on screen with a Copy button."""
+    if keyboard_access()[1]:
+        if typing_spot() is not False:
+            paste(text)
+            status["delivery"] = ""
+            return True
+        copy(text)
+        card(text.strip())
+        return False
+    copy(text)
     status["delivery"] = "Dictation copied to the clipboard. Press ⌘V to paste, or enable Accessibility for automatic paste."
     return False
 
@@ -1391,6 +1442,149 @@ def make_pill(on_click, on_right_click):
     return show
 
 
+CARD_WIDTH, CARD_PAD = 400, 16
+CARD_GREEN = AppKit.NSColor.colorWithSRGBRed_green_blue_alpha_(0.45, 0.85, 0.62, 1)  # the app's accent, lifted for dark
+
+
+def symbol(name, size, color):
+    image = AppKit.NSImage.imageWithSystemSymbolName_accessibilityDescription_(name, None)
+    config = AppKit.NSImageSymbolConfiguration.configurationWithPointSize_weight_(size, AppKit.NSFontWeightSemibold)
+    view = AppKit.NSImageView.imageViewWithImage_(image.imageWithSymbolConfiguration_(config))
+    view.setContentTintColor_(color)
+    return view
+
+
+class CardActions(AppKit.NSObject):
+    def copyText_(self, sender):
+        copy(self.text)
+        self.mark_copied()
+        self.hide(0.9)
+
+
+def make_card():
+    """A frosted card above the pill showing a dictation that had no text box to go into, with a Copy button. It
+    fades away by itself; a thin line along the bottom shows how long it has left. Returns card(text)."""
+    panel = AppKit.NSPanel.alloc().initWithContentRect_styleMask_backing_defer_(
+        ((0, 0), (CARD_WIDTH, 100)), AppKit.NSWindowStyleMaskBorderless | AppKit.NSWindowStyleMaskNonactivatingPanel,
+        AppKit.NSBackingStoreBuffered, False)
+    panel.setLevel_(AppKit.NSStatusWindowLevel)
+    panel.setHidesOnDeactivate_(False)
+    panel.setOpaque_(False)
+    panel.setHasShadow_(True)
+    panel.setBackgroundColor_(AppKit.NSColor.clearColor())
+    panel.setCollectionBehavior_(AppKit.NSWindowCollectionBehaviorCanJoinAllSpaces
+                                 | AppKit.NSWindowCollectionBehaviorFullScreenAuxiliary)
+    glass = AppKit.NSVisualEffectView.alloc().initWithFrame_(((0, 0), (CARD_WIDTH, 100)))
+    glass.setMaterial_(AppKit.NSVisualEffectMaterialHUDWindow)
+    glass.setBlendingMode_(AppKit.NSVisualEffectBlendingModeBehindWindow)
+    glass.setState_(AppKit.NSVisualEffectStateActive)
+    glass.setAppearance_(AppKit.NSAppearance.appearanceNamed_(AppKit.NSAppearanceNameVibrantDark))
+    glass.setWantsLayer_(True)
+    glass.layer().setCornerRadius_(16)
+    glass.layer().setMasksToBounds_(True)
+    glass.layer().setBorderWidth_(0.5)
+    glass.layer().setBorderColor_(AppKit.NSColor.colorWithWhite_alpha_(1, 0.14).CGColor())
+    panel.setContentView_(glass)
+
+    icon = symbol("doc.on.clipboard.fill", 11, CARD_GREEN)
+    heading = AppKit.NSTextField.labelWithString_("No text box in focus · copied to clipboard")
+    heading.setTextColor_(AppKit.NSColor.colorWithWhite_alpha_(1, 0.55))
+    heading.setFont_(AppKit.NSFont.systemFontOfSize_weight_(11, AppKit.NSFontWeightMedium))
+    words = AppKit.NSTextField.wrappingLabelWithString_("")
+    words.setTextColor_(AppKit.NSColor.colorWithWhite_alpha_(1, 0.94))
+    words.setFont_(AppKit.NSFont.systemFontOfSize_(14))
+    words.setMaximumNumberOfLines_(8)
+    words.cell().setTruncatesLastVisibleLine_(True)
+    actions = CardActions.alloc().init()
+    button = AppKit.NSButton.buttonWithTitle_target_action_("", actions, "copyText:")
+    button.setBordered_(False)
+    button.setWantsLayer_(True)
+    button.layer().setCornerRadius_(13)
+    button.setImagePosition_(AppKit.NSImageLeading)
+    button.cell().setImageHugsTitle_(True)
+    line = AppKit.NSView.alloc().init()  # counts down to the card closing
+    line.setWantsLayer_(True)
+    line.layer().setBackgroundColor_(CARD_GREEN.colorWithAlphaComponent_(0.7).CGColor())
+    for part in (icon, heading, words, button, line):
+        glass.addSubview_(part)
+
+    def style_button(title, symbol_name, color, fill):
+        config = AppKit.NSImageSymbolConfiguration.configurationWithPointSize_weight_(11, AppKit.NSFontWeightSemibold)
+        image = AppKit.NSImage.imageWithSystemSymbolName_accessibilityDescription_(symbol_name, None)
+        button.setImage_(image.imageWithSymbolConfiguration_(config))
+        button.setContentTintColor_(color)
+        button.setAttributedTitle_(AppKit.NSAttributedString.alloc().initWithString_attributes_(
+            " " + title, {AppKit.NSForegroundColorAttributeName: color,
+                          AppKit.NSFontAttributeName: AppKit.NSFont.systemFontOfSize_weight_(12, AppKit.NSFontWeightSemibold)}))
+        button.layer().setBackgroundColor_(fill.CGColor())
+        button.setFrame_(((CARD_WIDTH - CARD_PAD - 84, CARD_PAD), (84, 26)))
+    actions.mark_copied = lambda: style_button("Copied", "checkmark", CARD_GREEN, CARD_GREEN.colorWithAlphaComponent_(0.16))
+    timer, countdown = [None], [None]
+
+    def fade(alpha, seconds, then=None):
+        AppKit.NSAnimationContext.beginGrouping()
+        AppKit.NSAnimationContext.currentContext().setDuration_(seconds)
+        if then:
+            AppKit.NSAnimationContext.currentContext().setCompletionHandler_(then)
+        panel.animator().setAlphaValue_(alpha)
+        AppKit.NSAnimationContext.endGrouping()
+
+    def gone():
+        if panel.alphaValue() == 0:  # a new card may have faded in meanwhile
+            panel.orderOut_(None)
+            countdown[0].invalidate()
+
+    def hide(after):
+        if timer[0]:
+            timer[0].invalidate()
+        timer[0] = AppKit.NSTimer.scheduledTimerWithTimeInterval_repeats_block_(after, False, lambda _: fade(0, 0.25, gone))
+    actions.hide = hide
+
+    def card(text):
+        def update():
+            actions.text = text
+            inner = CARD_WIDTH - 2 * CARD_PAD
+            words.setStringValue_(text)
+            height = min(words.cell().cellSizeForBounds_(((0, 0), (inner, 10_000))).height, 8 * 18)
+            style_button("Copy", "doc.on.doc", AppKit.NSColor.whiteColor(), AppKit.NSColor.colorWithWhite_alpha_(1, 0.12))
+            total = CARD_PAD + 26 + 12 + height + 10 + 14 + CARD_PAD
+            words.setFrame_(((CARD_PAD, CARD_PAD + 26 + 12), (inner, height)))
+            icon.setFrame_(((CARD_PAD, total - CARD_PAD - 14), (14, 14)))
+            heading.setFrame_(((CARD_PAD + 20, total - CARD_PAD - 15), (inner - 20, 16)))
+            screen = AppKit.NSScreen.mainScreen().frame().size
+            # ponytail: centred above the pill, or below it at the top edge; beside it for side pills if wanted
+            gap = PILL_EDGE + 24
+            top = settings()["pill_position"] == "top"
+            y = screen.height - gap - total if top else gap
+            x = (screen.width - CARD_WIDTH) / 2
+            glass.setFrame_(((0, 0), (CARD_WIDTH, total)))
+            if not panel.isVisible() or panel.alphaValue() < 1:  # arrive with a short fade and rise
+                panel.setAlphaValue_(0)
+                panel.setFrame_display_(((x, y + (8 if top else -8)), (CARD_WIDTH, total)), True)
+                panel.orderFrontRegardless()
+                fade(1, 0.22)
+                AppKit.NSAnimationContext.beginGrouping()
+                AppKit.NSAnimationContext.currentContext().setDuration_(0.22)
+                panel.animator().setFrame_display_(((x, y), (CARD_WIDTH, total)), True)
+                AppKit.NSAnimationContext.endGrouping()
+            else:
+                panel.setFrame_display_(((x, y), (CARD_WIDTH, total)), True)
+            stay = min(20, 6 + len(text) / 30)  # longer dictations stay up longer, so there is time to read them
+            start = time.time()
+
+            def tick(each):
+                left = max(0, 1 - (time.time() - start) / stay)
+                line.setFrame_(((0, 0), (CARD_WIDTH * left, 2)))
+                if not left:
+                    each.invalidate()
+            if countdown[0]:
+                countdown[0].invalidate()
+            countdown[0] = AppKit.NSTimer.scheduledTimerWithTimeInterval_repeats_block_(1 / 30, True, tick)
+            hide(stay)
+        AppHelper.callAfter(update)
+    return card
+
+
 # ---- the dictation process ---------------------------------------------------------------------------------
 
 def main():
@@ -1440,6 +1634,7 @@ def main():
     # never the active app: no Dock icon, and keyboard focus always stays with the app you are typing in
     app.setActivationPolicy_(AppKit.NSApplicationActivationPolicyProhibited)
     show = make_pill(lambda: toggle(), open_settings)
+    card = make_card()
     actions["refresh"] = show.refresh
     show("busy")
     open_settings()  # the window opens with the app and stays in the Dock while it runs
@@ -1693,7 +1888,7 @@ def main():
         if not text:
             print("skipped: nothing but filler sounds")
             return
-        pasted = deliver(text + " ")  # trailing space so back-to-back dictations don't run together
+        pasted = deliver(text + " ", card)  # trailing space so back-to-back dictations don't run together
         last_paste[0] = {"text": text, "at": time.time(), "before": None} if pasted else None
         print(f"{took()} raw:   {raw}\n        clean: {text}")
         remember(text, raw, len(audio) / RATE)

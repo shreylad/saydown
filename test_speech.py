@@ -710,16 +710,26 @@ class SpeechTests(unittest.TestCase):
         appkit.NSPasteboardTypeString = self.a.AppKit.NSPasteboardTypeString
         with patch.object(self.a, "AppKit", appkit), patch.object(self.a, "keyboard_access", return_value=(True, False)), \
              patch.object(self.a, "paste") as paste:
-            self.assertFalse(self.a.deliver("- Cook dinner\n- Drive home"))
+            self.assertFalse(self.a.deliver("- Cook dinner\n- Drive home", Mock()))
         board.setString_forType_.assert_called_once_with("- Cook dinner\n- Drive home", appkit.NSPasteboardTypeString)
         paste.assert_not_called()
         self.assertIn("clipboard", self.a.status["delivery"])
 
     def test_granted_accessibility_uses_paste_and_clears_delivery_warning(self):
-        with patch.object(self.a, "keyboard_access", return_value=(True, True)), patch.object(self.a, "paste") as paste:
-            self.assertTrue(self.a.deliver("Hello"))
+        with patch.object(self.a, "keyboard_access", return_value=(True, True)), patch.object(self.a, "paste") as paste, \
+             patch.object(self.a, "typing_spot", return_value=None):
+            self.assertTrue(self.a.deliver("Hello", Mock()))
         paste.assert_called_once_with("Hello")
         self.assertEqual(self.a.status["delivery"], "")
+
+    def test_with_no_text_box_in_focus_dictation_is_copied_and_shown_instead_of_pasted(self):
+        card = Mock()
+        with patch.object(self.a, "keyboard_access", return_value=(True, True)), patch.object(self.a, "paste") as paste, \
+             patch.object(self.a, "typing_spot", return_value=False), patch.object(self.a, "copy") as copy:
+            self.assertFalse(self.a.deliver("Hello there ", card))
+        paste.assert_not_called()
+        copy.assert_called_once_with("Hello there ")
+        card.assert_called_once_with("Hello there")
 
     def test_failed_local_warmup_returns_with_visible_error_instead_of_killing_worker(self):
         local = Mock(side_effect=OSError("offline"))
