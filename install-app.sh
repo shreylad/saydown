@@ -34,7 +34,7 @@ cat > "$APP/Contents/Info.plist" <<EOF
     <key>CFBundleExecutable</key><string>Saydown</string>
     <key>CFBundleIconFile</key><string>icon</string>
     <key>CFBundlePackageType</key><string>APPL</string>
-    <key>CFBundleShortVersionString</key><string>0.3.0</string>
+    <key>CFBundleShortVersionString</key><string>0.3.1</string>
     <key>LSMinimumSystemVersion</key><string>14.0</string>
     <key>NSPrincipalClass</key><string>NSApplication</string>
     <key>NSHighResolutionCapable</key><true/>
