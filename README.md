@@ -24,13 +24,13 @@ For an Apple Silicon Mac running macOS 14 or later. Nothing else needs to be ins
 1. Download `Saydown.dmg` from the [latest release](https://github.com/shreylad/saydown/releases/latest), open it, and drag Saydown into Applications.
 2. Open Saydown. macOS will say it cannot verify the app, because it is not signed with an Apple developer account. Go to System Settings → Privacy & Security, scroll down, and click **Open Anyway**.
 3. Follow the **Setting up Saydown** card in the window. It has an Open Settings button for each permission (Accessibility and Input Monitoring) and restarts Saydown once both are on. macOS also asks for the Microphone; click Allow.
-4. Leave it open while it finishes setting itself up. It downloads the speech model (about 1.6 GB), then the AI models (about 6 GB), showing progress on the same card. You can dictate as soon as the speech model is ready.
+4. Leave it open while it finishes setting itself up. It downloads the speech model (about 1.6 GB), showing progress on the same card, and you can dictate as soon as it is ready. The AI features (Rewrite, Ask, voice commands, fixing self-corrections) are optional: turn them on in Settings or on the setup card, and Saydown downloads their models (about 6 GB).
 
 Hold right Option, talk, release.
 
 Nothing else needs installing. The AI features (cleanup of self-corrections, Rewrite, Ask, voice commands) run inside Saydown itself, on a model it downloads from Hugging Face the same way as the speech model. If a download fails, dictation still works and Saydown tries again the next time it opens.
 
-Your dictations, dictionary and settings are kept in `~/Library/Application Support/Saydown`.
+Your dictations, dictionary and settings are kept in `~/Library/Application Support/Saydown`. Delete a single dictation from its row, export them all to a Markdown file in Downloads, or set Settings → Keep history to delete old ones automatically. The log records timings and word counts, not what you said, unless you turn on Write dictations to the log.
 
 ## Run from source
 
@@ -40,7 +40,7 @@ Requirements: an Apple Silicon Mac (16 GB of memory is enough), and [uv](https:/
 uv run dictate.py
 ```
 
-The first run downloads the Whisper model (about 1.6 GB) and the AI models (about 6 GB). uv installs the Python dependencies on its own. Run this way, the Saydown window opens as a page in your browser.
+The first run downloads the Whisper model (about 1.6 GB); the AI models (about 6 GB) download once you turn on AI features in Settings. uv installs the Python dependencies on its own. Run this way, the Saydown window opens as a page in your browser.
 
 macOS will ask the app you launch it from (Terminal, iTerm, ...) for three permissions under System Settings → Privacy & Security. Grant all three, then start it again:
 
@@ -100,7 +100,7 @@ The terminal logs every dictation with the raw transcription beside the cleaned 
 
 ## Rewrite styles
 
-In the window, each dictation has a Rewrite button. Pick a style and the result appears in a card with Copy and Regenerate; nothing is generated until you pick one. Eleven styles are built in (Grammar, Polite, Sugarcoated, Shorter, Bullet points, Summary, Tasks, Email, Daily update, Meeting notes, Thought dump). Add, edit, and delete your own in the Styles tab: a name of up to 30 characters and an instruction of up to 300. Custom styles are saved in `styles.json`.
+In the window, each dictation has a Rewrite button. Pick a style and the result appears in a card with Copy and Regenerate; nothing is generated until you pick one. Grammar, Shorter, Bullet points and your own styles show first; More shows the rest. Eleven styles are built in (Grammar, Polite, Sugarcoated, Shorter, Bullet points, Summary, Tasks, Email, Daily update, Meeting notes, Thought dump). Add, edit, and delete your own in the Styles tab: a name of up to 30 characters and an instruction of up to 300. Custom styles are saved in `styles.json`.
 
 Every style uses the same prompt, which tells the model to keep your facts, names, and numbers, and to treat the dictation as text to rewrite, never as instructions.
 
@@ -112,7 +112,7 @@ The Ask tab answers questions from your saved dictations, such as "what did I sa
 
 ## Notes
 
-Record a note, in the window, records without typing anything: stop it from the same button, the pill, or your shortcut, and the transcript is saved in the list. Use it for meetings and thinking out loud, then open Rewrite and pick Meeting notes, Thought dump, Tasks or Summary. A note is one voice with no speaker labels, and the styles see about 30 minutes of speech at most.
+Record a note, in the window, records without typing anything: stop it from the same button, the pill, or your shortcut, and the transcript is saved in the list. It is a personal voice note for thinking out loud, not a meeting transcript: open Rewrite and pick Meeting notes, Thought dump, Tasks or Summary. A note is one voice with no speaker labels, and the styles see about 30 minutes of speech at most.
 
 ## How text is cleaned
 

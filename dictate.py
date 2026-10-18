@@ -123,7 +123,11 @@ DEFAULTS = {
     "speech_model": "gpt-transcribe",
     "openrouter_model": "openai/whisper-large-v3-turbo",
     "voice_commands": False,  # "make that shorter" / "undo that" right after a dictation edits it in place
+    "ai_features": None,  # the 6 GB text and search models; None until chosen, see ai_on()
+    "keep_days": 0,  # history entries older than this are deleted; 0 keeps them forever
+    "log_text": False,  # write what was said into the log file, not just how long it took
 }
+KEEP_DAYS = (0, 7, 30, 90, 365)
 
 PROMPT = """You clean up dictated speech. Rewrite the text inside <transcript> as the speaker meant to write it.
 
@@ -362,6 +366,74 @@ def read_history():
     return entries
 
 
+HISTORY_LOCK = threading.Lock()  # a dictation appends while the window may be deleting
+
+
+def keep_history(drop):
+    """Rewrite the history without the entries drop(entry) picks, and forget their search vectors. Lines that do not
+    parse are kept as they are. Returns how many entries went."""
+    with HISTORY_LOCK:
+        try:
+            lines = HISTORY.read_text(errors="replace").splitlines(keepends=True)
+        except FileNotFoundError:
+            return 0
+        kept, gone = [], set()
+        for line in lines:
+            try:
+                entry = json.loads(line)
+                if isinstance(entry, dict) and drop(entry):
+                    gone.add(entry.get("ts"))
+                    continue
+            except (ValueError, TypeError):
+                pass
+            kept.append(line if line.endswith("\n") else line + "\n")
+        if gone:
+            spare = HISTORY.with_suffix(".tmp")
+            spare.write_text("".join(kept))
+            spare.replace(HISTORY)
+            forget_vectors(gone)
+        return len(gone)
+
+
+def forget_vectors(gone):
+    try:
+        with np.load(EMBEDDINGS) as saved:
+            keep = ~np.isin(saved["ts"], list(gone))
+            np.savez(EMBEDDINGS, model=saved["model"], ts=saved["ts"][keep], keys=saved["keys"][keep],
+                     vectors=saved["vectors"][keep])
+    except (OSError, KeyError, ValueError):  # missing or from an older version: rebuilt on the next question
+        EMBEDDINGS.unlink(missing_ok=True)
+
+
+def prune_history(now=None):
+    days = settings()["keep_days"]
+    if days:
+        cutoff = (now or time.time()) - days * 86400
+        if gone := keep_history(lambda e: isinstance(e.get("ts"), (int, float)) and e["ts"] < cutoff):
+            print(f"deleted {gone} dictations older than {days} days")
+
+
+def export_history(entries, folder=None):
+    """Write the history to a Markdown file in Downloads, oldest first. Returns its path."""
+    folder = folder or Path.home() / "Downloads"
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / f"Saydown history {datetime.date.today()}.md"
+    parts, day = ["# Saydown history\n"], None
+    for entry in sorted(entries, key=lambda e: e["ts"]):
+        when = datetime.datetime.fromtimestamp(entry["ts"])
+        if when.date() != day:
+            day = when.date()
+            parts.append(f"\n## {when:%A %-d %B %Y}\n")
+        parts.append(f"\n**{when:%H:%M}**{' · note' if entry.get('kind') == 'note' else ''}\n\n{entry['text']}\n")
+    path.write_text("".join(parts))
+    return path
+
+
+def logged(text):
+    """What was said, for the log, or only its length: the log is a plain file outside Saydown's control."""
+    return text if settings()["log_text"] else f"({len(text.split())} words)"
+
+
 def stats(entries, today=None):
     today = today or datetime.date.today()
     words = sum(len(e["text"].split()) for e in entries)
@@ -392,9 +464,13 @@ def valid_settings(body):
     new = dict(settings())
     if "idle_alpha" in body:
         new["idle_alpha"] = min(1.0, max(0.1, float(body["idle_alpha"])))
-    for key in ("save_history", "voice_commands"):
+    for key in ("save_history", "voice_commands", "ai_features", "log_text"):
         if key in body:
             new[key] = body[key] is True
+    if "keep_days" in body:
+        if body["keep_days"] not in KEEP_DAYS or isinstance(body["keep_days"], bool):
+            raise ValueError("bad keep_days")
+        new["keep_days"] = body["keep_days"]
     for key, choices in (("language", LANGUAGES), ("microphone", ["", *microphones()]),
                          ("speech_provider", ("local", "openai", "openrouter")),
                          ("pill_position", PILL_POSITIONS), ("speech_model", SPEECH_MODELS), ("openrouter_model", OPENROUTER_MODELS)):
@@ -507,21 +583,42 @@ def fetch(repo, note):
         arrived.set()
 
 
+def downloaded(repo):
+    import huggingface_hub as hub
+    return isinstance(hub.try_to_load_from_cache(repo, "config.json"), str)
+
+
+def ai_on():
+    """Whether the text and search models are wanted. Until chosen in Settings: only if they are already on disk, so a
+    new install starts with plain dictation and an existing one keeps what it had."""
+    chosen = settings()["ai_features"]
+    return chosen if isinstance(chosen, bool) else downloaded(TEXT_MODEL)
+
+
+_ai_setup = threading.Lock()
+
+
 def setup_ai():
     """Make the AI features work on a Mac with nothing installed: download the models, then load the text model."""
     def note(step, **more):
         status["ai"] = {"step": step} | more
 
+    if not ai_on():
+        return note("off")
+    if not _ai_setup.acquire(blocking=False):  # already under way, from launch or an earlier switch in Settings
+        return
     try:
         for repo in (TEXT_MODEL, EMBED_MODEL):
             if repo not in paths:
                 paths[repo] = fetch(repo, note)
         note("starting")
         llm("Reply with OK.", "warm up", max_tokens=1)
-        note("ready")
+        note("ready" if ai_on() else "off")
     except Exception as e:  # dictation works without any of this; the window says what went wrong
         print("AI setup failed:", e)
-        note("failed", error=str(e))
+        note("off" if not ai_on() else "failed", error=str(e))
+    finally:
+        _ai_setup.release()
 
 
 # ---- transcript cleanup and pasting ------------------------------------------------------------------------
@@ -536,6 +633,8 @@ def unload():
 def llm(system, user, max_tokens=2048, temperature=1.0):
     import mlx_lm
     from mlx_lm.sample_utils import make_sampler
+    if not ai_on():
+        raise OSError("AI features are off")
     if TEXT_MODEL not in paths:  # never download here: a dictation would wait minutes for it
         raise OSError("the AI model is not downloaded yet")
     # ponytail: one lock, so a dictation waits behind a long rewrite; give the models a queue if that bites
@@ -727,9 +826,9 @@ def clean(raw):
                    "dictionary entry, it was misheard: replace it with the dictionary spelling. Change nothing else.")
     try:
         out = llm(system, f"<transcript>{raw}</transcript>", temperature=0)
-    except Exception as e:  # never lose what was said: fall back to the raw transcript
-        print("cleanup failed, using raw transcript:", e)
-        return raw
+    except Exception as e:  # never lose what was said: fall back to the cleanup by rule
+        print("cleanup by model unavailable, tidying by rule:", e)
+        return tidy(raw)
     # ponytail: length check is a naive guard against the model answering instead of cleaning
     return out if out and len(out) < 2 * len(raw) + 20 else raw
 
@@ -1004,29 +1103,84 @@ def by_keywords(entries, question):
                   key=lambda e: (len(words & set(re.findall(r"\w+", e["text"].lower()))), e["ts"]))
 
 
-def by_meaning(entries, question, cache=EMBEDDINGS):
-    """Entries ranked by how close their meaning is to the question, or None if the embedding model is missing."""
+def by_meaning(sections, question, cache=EMBEDDINGS):
+    """Sections ranked by how close their meaning is to the question, or None if the embedding model is missing."""
     try:
-        known = {}
+        known, when = {}, {}
         if cache and cache.exists():
             with np.load(cache) as saved:
-                if "model" in saved and str(saved["model"]) == EMBED_MODEL:  # vectors from another model do not compare
-                    known = dict(zip(saved["ts"].tolist(), saved["vectors"]))
-        missing = [e for e in entries if e["ts"] not in known]
+                # vectors from another model do not compare; files from before sections had no "keys"
+                if "keys" in saved and str(saved["model"]) == EMBED_MODEL:
+                    known = dict(zip(saved["keys"].tolist(), saved["vectors"]))
+                    when = dict(zip(saved["keys"].tolist(), saved["ts"].tolist()))
+        missing = [s for s in sections if s["key"] not in known]
         if missing:
-            known.update(zip((e["ts"] for e in missing), embed([e["text"] for e in missing])))
+            known.update(zip((s["key"] for s in missing), embed([s["text"] for s in missing])))
+            when.update((s["key"], s["ts"]) for s in missing)
             if cache:  # ponytail: rewritten whole after new dictations; fine until tens of thousands of entries
-                np.savez(cache, model=EMBED_MODEL, ts=np.array(list(known)), vectors=np.array(list(known.values())))
+                np.savez(cache, model=EMBED_MODEL, keys=np.array(list(known)), ts=np.array([when[k] for k in known]),
+                         vectors=np.array(list(known.values())))
         asked = embed([question])[0]
-        return sorted(entries, key=lambda e: float(known[e["ts"]] @ asked), reverse=True)
+        return sorted(sections, key=lambda s: float(known[s["key"]] @ asked), reverse=True)
     except Exception as e:
         print("searching by meaning failed, matching keywords instead:", e)
         return None
 
 
+def split_sections(text, size=1000):
+    """Text in pieces of at most size characters, split between sentences, so a search can reach every part."""
+    parts, current = [], ""
+    for sentence in re.split(r"(?<=[.!?\n])\s+", text.strip()):
+        while len(sentence) > size:  # one endless sentence, as Whisper writes for a long ramble: cut it anywhere
+            if current:
+                parts.append(current)
+                current = ""
+            parts.append(sentence[:size])
+            sentence = sentence[size:]
+        if current and len(current) + 1 + len(sentence) > size:
+            parts.append(current)
+            current = sentence
+        else:
+            current = f"{current} {sentence}" if current else sentence
+    return parts + [current] if current else parts or [text]
+
+
+NUMBERS = {"a": 1, "an": 1, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7, "eight": 8,
+           "nine": 9, "ten": 10, "fourteen": 14, "thirty": 30}
+WEEKDAYS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
+
+
+def date_range(question, today=None):
+    """(first day, last day) that a question is about, as in "yesterday" or "last week", or None."""
+    today, q, day = today or datetime.date.today(), question.lower(), datetime.timedelta(days=1)
+    count = r"(\d+|" + "|".join(NUMBERS) + ")"
+    number = lambda word: int(word) if word.isdigit() else NUMBERS[word]
+    monday = today - today.weekday() * day
+    first_of_month = today.replace(day=1)
+    if re.search(r"\b(today|this morning|this afternoon|this evening|tonight)\b", q):
+        return today, today
+    if re.search(r"\byesterday\b", q):
+        return today - day, today - day
+    if match := re.search(rf"\b(?:last|past) {count} days\b", q):
+        return today - (number(match[1]) - 1) * day, today
+    if match := re.search(rf"\b{count} days? ago\b", q):
+        return (today - number(match[1]) * day,) * 2
+    if re.search(r"\bthis week\b", q):
+        return monday, today
+    if re.search(r"\blast week\b", q):
+        return monday - 7 * day, monday - day
+    if re.search(r"\bthis month\b", q):
+        return first_of_month, today
+    if re.search(r"\blast month\b", q):
+        return (first_of_month - day).replace(day=1), first_of_month - day
+    if match := re.search(r"\b(" + "|".join(WEEKDAYS) + r")\b", q):  # the most recent one before today
+        back = (today.weekday() - WEEKDAYS.index(match[1])) % 7 or 7
+        return (today - back * day,) * 2
+    return None
+
+
 def relevant(entries, question, budget=6000, rank=by_keywords):
     """The entries to show the model for a question, oldest first, within a budget of characters."""
-    # ponytail: ranked by closeness to the question only, so "what did I say yesterday" is not found by date
     ranked = rank(entries, question) or by_keywords(entries, question)
     picked, used = [], 0
     for entry in ranked:
@@ -1041,8 +1195,15 @@ def ask(question, entries, rank=by_meaning):
     """Answer a question from the saved dictations. Returns the answer and the numbered entries it was shown."""
     if not entries:
         return {"answer": "You have no saved dictations yet.", "sources": []}
-    sources = [{"n": n, "ts": e["ts"], "text": e["text"]}
-               for n, e in enumerate(relevant(entries, question, rank=rank), 1)]
+    if span := date_range(question):
+        entries = [e for e in entries if span[0] <= datetime.date.fromtimestamp(e["ts"]) <= span[1]]
+        if not entries:
+            days = f"{span[0]:%A %-d %B}" + ("" if span[0] == span[1] else f" to {span[1]:%A %-d %B}")
+            return {"answer": f"You have no saved dictations from {days}.", "sources": []}
+    sections = [{"ts": e["ts"], "key": f"{e['ts']!r}:{i}", "text": part}
+                for e in entries for i, part in enumerate(split_sections(e["text"]))]
+    sources = [{"n": n, "ts": s["ts"], "text": s["text"]}
+               for n, s in enumerate(relevant(sections, question, rank=rank), 1)]
     listing = "\n".join(f"[{s['n']}] {datetime.datetime.fromtimestamp(s['ts']):%A %Y-%m-%d %H:%M}: {s['text'][:1500]}"
                         for s in sources)
     answer = llm(f"{ASK_PROMPT}\n\nToday is {datetime.date.today():%A %Y-%m-%d}.",
@@ -1136,6 +1297,89 @@ def typing_spot():
     return selection
 
 
+class CFRange(ctypes.Structure):
+    _fields_ = [("location", ctypes.c_long), ("length", ctypes.c_long)]
+
+
+_ax.AXValueCreate.restype, _ax.AXValueCreate.argtypes = ctypes.c_void_p, [ctypes.c_uint32, ctypes.c_void_p]
+_ax.CFEqual.restype, _ax.CFEqual.argtypes = ctypes.c_bool, [ctypes.c_void_p, ctypes.c_void_p]
+
+
+def front_pid():
+    front = AppKit.NSWorkspace.sharedWorkspace().frontmostApplication()
+    return front.processIdentifier() if front else None
+
+
+def focus_now():
+    """The focused element (the caller releases it), or None when macOS will not say."""
+    system = _ax.AXUIElementCreateSystemWide()
+    error, focused = ax_get(system, "AXFocusedUIElement")
+    _ax.CFRelease(system)
+    return None if error else focused
+
+
+def locate(held, text):
+    """Where text, plus the space typed after it if that is still there, last appears in held: (start, length) in the
+    UTF-16 units macOS counts in, and the matched string. None if it is not there."""
+    for wanted in (text + " ", text):
+        start = held.rfind(wanted)
+        if start >= 0:
+            units = lambda s: len(s.encode("utf-16-le")) // 2
+            return (units(held[:start]), units(wanted)), wanted
+    return None
+
+
+def select_typed(focused, text):
+    """Select text in the focused text box. The matched string when selected; False when the box can be read and no
+    longer holds text; None when macOS will not show what the box holds."""
+    error, value = ax_get(focused, "AXValue")
+    if error or not value:
+        return None
+    held = objc.objc_object(c_void_p=value)
+    held = str(held) if isinstance(held, str) else None
+    _ax.CFRelease(value)
+    if held is None:
+        return None
+    found = locate(held, text)
+    if not found:
+        return False
+    span = CFRange(*found[0])
+    wrapped = _ax.AXValueCreate(4, ctypes.byref(span))  # kAXValueCFRangeType
+    key = AppKit.NSString.stringWithString_("AXSelectedTextRange").nsstring()
+    error = _ax.AXUIElementSetAttributeValue(focused, objc.pyobjc_id(key), wrapped)
+    _ax.CFRelease(wrapped)
+    return None if error else found[1]
+
+
+def replace_typed(last, new, typed_at):
+    """Swap the dictation just pasted for new, or remove it when new is None, but only where that is certain to touch
+    nothing else. Returns "" when done, or why it was not."""
+    if front_pid() != last["pid"]:
+        return "you switched apps"
+    if typed_at > last["at"]:
+        return "you typed since"
+    focused = focus_now()
+    try:
+        if focused and last["focus"] and not _ax.CFEqual(focused, last["focus"]):
+            return "a different text box is in focus"
+        selected = select_typed(focused, last["text"]) if focused else None
+    finally:
+        if focused:
+            _ax.CFRelease(focused)
+    if selected is False:
+        return "the text was changed"
+    if selected is None:  # the box hides its text; nothing was typed since, so undo takes back the paste
+        press(6, COMMAND)
+        time.sleep(0.1)
+        if new is not None:
+            paste(new + " ")
+    elif new is None:
+        press(51, 0)  # Delete removes the selection
+    else:
+        paste(new + selected[len(last["text"]):])
+    return ""
+
+
 def deliver(text, card):
     """Paste at the cursor. With no text box in focus, or without Accessibility, leave it on the clipboard; with no
     text box, card(text) also shows it on screen with a Copy button."""
@@ -1184,7 +1428,8 @@ def make_handler(on_settings_change, on_quit, on_note, taking_note, on_restart, 
                 provider = settings()["speech_provider"]
                 key_provider = provider if provider in KEYCHAINS else "openai"
                 return self.reply({"history": entries[-300:][::-1], "stats": stats(entries),
-                                   "dictionary": term_list(), "settings": settings() | {"hotkey": hotkey()},
+                                   "dictionary": term_list(),
+                                   "settings": settings() | {"hotkey": hotkey(), "ai_features": ai_on()},
                                    "setup": status | {"access": access},
                                    "speech": {"models": SPEECH_CATALOG[key_provider], "key_saved": cloud_key_saved(key_provider),
                                               "last": dict(speech_status)},
@@ -1206,8 +1451,16 @@ def make_handler(on_settings_change, on_quit, on_note, taking_note, on_restart, 
                 if self.path == "/api/dictionary":
                     DICTIONARY.write_text("".join(t + "\n" for t in valid_terms(body["terms"])))
                 elif self.path == "/api/settings":
+                    was_on = ai_on()
                     SETTINGS.write_text(json.dumps(valid_settings(body), indent=2) + "\n")
                     on_settings_change()
+                    if ai_on() and not was_on:
+                        threading.Thread(target=setup_ai, daemon=True).start()
+                    elif was_on and not ai_on():  # give back the 5 GB the text model holds
+                        status["ai"] = {"step": "off"}
+                        threading.Thread(target=unload, daemon=True).start()
+                    if "keep_days" in body:
+                        prune_history()
                 elif self.path == "/api/speech-key":
                     if self.headers.get("Content-Type", "").split(";")[0] != "application/json":
                         return self.reply({"error": "JSON required"}, status=400)
@@ -1245,9 +1498,12 @@ def make_handler(on_settings_change, on_quit, on_note, taking_note, on_restart, 
                         answer = lambda: ask(question, read_history())
                     else:
                         text = body["text"]
-                        # ponytail: about 30 minutes of speech fits the model's context; summarise in parts past that
-                        if not isinstance(text, str) or not text.strip() or len(text) > 40000:
+                        if not isinstance(text, str) or not text.strip():
                             raise ValueError("bad text")
+                        # ponytail: about 30 minutes of speech fits the model's context; summarise in parts past that
+                        if len(text) > 40000:
+                            return self.reply({"error": "This is too long to rewrite in one go. Rewrite works on up "
+                                                        "to about 30 minutes of speech."}, status=400)
                         if "instruction" in body:  # free text instead of a saved style
                             instruction = plain(body["instruction"], 300)
                             if not instruction:
@@ -1261,7 +1517,8 @@ def make_handler(on_settings_change, on_quit, on_note, taking_note, on_restart, 
                         return self.reply(answer())
                     except OSError as e:
                         print(self.path, "failed:", e)
-                        return self.reply({"error": "The AI model is not ready yet. Its download shows in this window."}, status=502)
+                        return self.reply({"error": "The AI model is not ready yet. Its download shows in this window."
+                                           if ai_on() else "AI features are off. Turn them on in Settings."}, status=502)
                 elif self.path == "/api/styles":  # add a custom style
                     styles = custom_styles()
                     if len(styles) >= 50:
@@ -1276,8 +1533,17 @@ def make_handler(on_settings_change, on_quit, on_note, taking_note, on_restart, 
                 elif self.path == "/api/note":  # start, or stop and save, a recording that is kept instead of typed
                     on_note()
                 elif self.path == "/api/history/clear":
-                    HISTORY.unlink(missing_ok=True)
-                    EMBEDDINGS.unlink(missing_ok=True)
+                    with HISTORY_LOCK:
+                        HISTORY.unlink(missing_ok=True)
+                        EMBEDDINGS.unlink(missing_ok=True)
+                elif self.path == "/api/history/delete":
+                    ts = body["ts"]
+                    if isinstance(ts, bool) or not isinstance(ts, (int, float)) or not keep_history(lambda e: e.get("ts") == ts):
+                        raise ValueError("no such dictation")
+                elif self.path == "/api/history/export":
+                    path = export_history(read_history())
+                    subprocess.run(["open", "-R", str(path)], check=False)  # show it in Finder
+                    return self.reply({"ok": True, "path": str(path)})
                 elif self.path == "/api/copy":
                     if not isinstance(body["text"], str):
                         raise ValueError("bad text")
@@ -1671,7 +1937,10 @@ def main():
     lock = threading.Lock()
     hands_free = [False]  # True when recording runs until the next click or tap, with no key held
     pressed_at, last_tap = [0.0], [0.0]
-    last_paste = [None]  # {"text", "at", "before"}: what a voice command would change; "before" is the text it replaced
+    # {"text", "at", "before", "pid", "focus"}: what a voice command would change, and the app and text box it went
+    # into; "before" is the text it replaced
+    last_paste = [None]
+    typed_at = [0.0]  # when a key was last typed by hand, in any app
 
     def start(by_click, as_note=False):
         unavailable = status.get("speech_error") and settings()["speech_provider"] == "local"
@@ -1787,6 +2056,9 @@ def main():
                 choose_hotkey(kind, keycode, flags, event)
                 return event
             key = hotkey()
+            if kind == Quartz.kCGEventKeyDown and (keycode, flags & MODS) != (key["keycode"], key["mods"]) and \
+                    Quartz.CGEventGetIntegerValueField(event, Quartz.kCGEventSourceUnixProcessID) != os.getpid():
+                typed_at[0] = time.time()  # typed by hand, not Saydown's own ⌘V: the last paste is no longer safe to edit
             if keycode != key["keycode"] or time.time() < quiet_until[0]:
                 return event
             if modifier_only(key):
@@ -1868,15 +2140,16 @@ def main():
             kind = command(raw, last["text"])
             if kind != "TYPE":
                 new = last["before"] if kind == "UNDO" else edit(last["text"], raw)  # before any key is sent
-                # ponytail: ⌘Z assumes nothing was typed since the paste; select the text instead if that bites
-                press(6, COMMAND)
-                print(f"{took()} voice command {kind}: {raw}")
-                if new is None:  # undoing a plain dictation: nothing to put back
-                    last_paste[0] = None
+                why = replace_typed(last, new, typed_at[0])
+                if why:
+                    print(f"{took()} voice command {kind} not applied: {why}: {logged(raw)}")
+                    status["delivery"] = f"“{raw}” changed nothing, because {why}. Saydown edits only what it just typed."
+                    set_last(None)
+                    show("Not changed")
+                    time.sleep(1.5)
                     return
-                time.sleep(0.1)
-                paste(new + " ")
-                last_paste[0] = {"text": new, "at": time.time(), "before": None if kind == "UNDO" else last["text"]}
+                print(f"{took()} voice command {kind}: {logged(raw)}")
+                set_last(new, before=None if kind == "UNDO" else last["text"])
                 if kind == "EDIT":
                     remember(new, last["text"], len(audio) / RATE)
                 return
@@ -1891,14 +2164,22 @@ def main():
             print("skipped: nothing but filler sounds")
             return
         pasted = deliver(text + " ", card)  # trailing space so back-to-back dictations don't run together
-        last_paste[0] = {"text": text, "at": time.time(), "before": None} if pasted else None
-        print(f"{took()} raw:   {raw}\n        clean: {text}")
+        set_last(text if pasted else None)
+        print(f"{took()} raw:   {logged(raw)}\n        clean: {logged(text)}")
         remember(text, raw, len(audio) / RATE)
+
+    def set_last(text, before=None):
+        """Note what was just pasted, and where, for a voice command to change; None forgets it."""
+        old = last_paste[0]
+        if old and old["focus"]:
+            _ax.CFRelease(old["focus"])
+        last_paste[0] = text and {"text": text, "at": time.time(), "before": before, "pid": front_pid(),
+                                  "focus": focus_now()}
 
     def remember(text, raw, audio_s, **extra):
         if settings()["save_history"] or extra:  # a note exists only in history, so it is always saved
             # ponytail: the file grows forever and is re-read whole; rotate or use SQLite past ~10k entries
-            with HISTORY.open("a") as f:
+            with HISTORY_LOCK, HISTORY.open("a") as f:
                 f.write(json.dumps({"ts": time.time(), "text": text, "raw": raw, "audio_s": round(audio_s, 1)}
                                    | extra) + "\n")
 
@@ -1921,7 +2202,7 @@ def main():
                 return "\U0001F512 Shortcut paused"
             return ""
 
-        shown, recheck = idle(), 0.0
+        shown, recheck, prune_at = idle(), 0.0, 0.0
         show(shown)
         status["loading"] = False
         print(f"ready: hold {hotkey()['label']}, double-tap it, or click the pill to dictate")
@@ -1934,6 +2215,12 @@ def main():
                 if recording[0] and not hands_free[0] and not key_is_down() and time.time() - pressed_at[0] > 1:
                     print("key release was missed, stopping the recording")
                     stop()
+                if time.time() > prune_at:  # the "Keep history" setting, applied at launch and then hourly
+                    prune_at = time.time() + 3600
+                    try:
+                        prune_history()
+                    except OSError as e:
+                        print("could not delete old dictations:", e)
                 if time.time() > recheck:  # what was granted in System Settings since the last look
                     recheck = time.time() + 2
                     status["mic"] = microphone_allowed()

@@ -803,6 +803,165 @@ class SpeechTests(unittest.TestCase):
         saved.assert_called_once_with("openrouter")
         self.assertEqual(handler.reply.call_args.args[0]["speech"]["models"], self.a.OPENROUTER_MODELS)
 
+    def replace(self, selected, new="Shorter.", focus_same=True, pid=1, typed_at=0.0):
+        last = {"text": "A long sentence.", "at": 10.0, "before": None, "pid": 1, "focus": 7}
+        with patch.object(self.a, "front_pid", return_value=pid), patch.object(self.a, "focus_now", return_value=8), \
+             patch.object(self.a._ax, "CFRelease"), patch.object(self.a._ax, "CFEqual", return_value=focus_same), \
+             patch.object(self.a, "select_typed", return_value=selected), patch.object(self.a.time, "sleep"), \
+             patch.object(self.a, "press") as press, patch.object(self.a, "paste") as paste:
+            why = self.a.replace_typed(last, new, typed_at)
+        return why, press, paste
+
+    def test_voice_edit_never_sends_keys_after_a_switch_typing_or_a_change(self):
+        for why, kwargs in (("you switched apps", {"pid": 2}), ("you typed since", {"typed_at": 11.0}),
+                            ("a different text box is in focus", {"focus_same": False}),
+                            ("the text was changed", {})):
+            result, press, paste = self.replace(False, **kwargs)
+            self.assertEqual(result, why)
+            press.assert_not_called()
+            paste.assert_not_called()
+
+    def test_voice_edit_replaces_the_selected_dictation_without_undo(self):
+        why, press, paste = self.replace("A long sentence. ")
+        self.assertEqual(why, "")
+        press.assert_not_called()
+        paste.assert_called_once_with("Shorter. ")
+        why, press, paste = self.replace("A long sentence. ", new=None)
+        press.assert_called_once_with(51, 0)
+        paste.assert_not_called()
+
+    def test_voice_edit_falls_back_to_undo_only_when_the_text_box_hides_its_text(self):
+        why, press, paste = self.replace(None)
+        self.assertEqual(why, "")
+        press.assert_called_once_with(6, self.a.COMMAND)
+        paste.assert_called_once_with("Shorter. ")
+
+    def test_locate_counts_utf16_units_and_prefers_the_typed_space(self):
+        self.assertEqual(self.a.locate("👋 hi there more hi there ", "hi there"), ((17, 9), "hi there "))
+        self.assertEqual(self.a.locate("x hi there", "hi there"), ((2, 8), "hi there"))
+        self.assertIsNone(self.a.locate("edited text", "hi there"))
+
+    def test_ai_features_off_means_no_download_no_model_and_tidy_cleanup(self):
+        self.config(ai_features=False)
+        with patch.object(self.a, "fetch") as fetch:
+            self.a.setup_ai()
+        fetch.assert_not_called()
+        self.assertEqual(self.a.status["ai"], {"step": "off"})
+        with self.assertRaisesRegex(OSError, "off"):
+            self.a.llm("system", "user")
+        self.assertEqual(self.a.clean("Send it Tuesday, um, sorry, Wednesday."), "Send it Tuesday, sorry, Wednesday.")
+        handler = self.handler("/api/rewrite", {"text": "Hello there.", "style": "grammar"})
+        handler.do_POST()
+        self.assertEqual(handler.reply.call_args.kwargs["status"], 502)
+        self.assertIn("Turn them on in Settings", handler.reply.call_args.args[0]["error"])
+
+    def test_ai_features_default_follows_what_is_already_downloaded(self):
+        for on_disk in (True, False):
+            with patch.object(self.a, "downloaded", return_value=on_disk):
+                self.assertIs(self.a.ai_on(), on_disk)
+        self.config(ai_features=True)
+        with patch.object(self.a, "downloaded", return_value=False):
+            self.assertTrue(self.a.ai_on())
+
+    def test_turning_ai_features_on_starts_the_download_and_off_frees_the_model(self):
+        self.config(ai_features=False)
+        with patch.object(self.a.threading, "Thread") as thread:
+            self.handler("/api/settings", {"ai_features": True}).do_POST()
+        self.assertIs(thread.call_args.kwargs["target"], self.a.setup_ai)
+        with patch.object(self.a.threading, "Thread") as thread:
+            self.handler("/api/settings", {"ai_features": False}).do_POST()
+        self.assertIs(thread.call_args.kwargs["target"], self.a.unload)
+        self.assertEqual(self.a.status["ai"], {"step": "off"})
+
+    def write_history(self, *entries, extra=""):
+        self.a.HISTORY.write_text("".join(json.dumps(e) + "\n" for e in entries) + extra)
+
+    def test_deleting_one_dictation_keeps_the_rest_and_its_search_vector_goes(self):
+        a, b, c = ({"ts": 1_700_000_000 + n, "text": f"entry {n}", "audio_s": 1} for n in range(3))
+        self.write_history(a, b, c, extra="{unfinished\n")
+        np = self.a.np
+        np.savez(self.a.EMBEDDINGS, model=self.a.EMBED_MODEL, keys=np.array([f"{e['ts']!r}:0" for e in (a, b, c)]),
+                 ts=np.array([a["ts"], b["ts"], c["ts"]]), vectors=np.ones((3, 2), np.float32))
+        handler = self.handler("/api/history/delete", {"ts": b["ts"]})
+        handler.do_POST()
+        self.assertEqual(handler.reply.call_args.args[0], {"ok": True})
+        self.assertEqual(self.a.read_history(), [a, c])
+        self.assertIn("{unfinished\n", self.a.HISTORY.read_text())
+        with np.load(self.a.EMBEDDINGS) as saved:
+            self.assertEqual(saved["ts"].tolist(), [a["ts"], c["ts"]])
+        missing = self.handler("/api/history/delete", {"ts": 5})
+        missing.do_POST()
+        self.assertEqual(missing.reply.call_args.kwargs["status"], 400)
+        self.a.HISTORY.write_text("")
+
+    def test_keep_history_deletes_only_entries_older_than_the_setting(self):
+        now = 1_800_000_000
+        old, recent = {"ts": now - 8 * 86400, "text": "old", "audio_s": 1}, {"ts": now - 86400, "text": "new", "audio_s": 1}
+        self.write_history(old, recent)
+        self.a.prune_history(now)  # "Forever" by default
+        self.assertEqual(len(self.a.read_history()), 2)
+        self.config(keep_days=7)
+        self.a.prune_history(now)
+        self.assertEqual(self.a.read_history(), [recent])
+        with self.assertRaises(ValueError):
+            self.a.valid_settings({"keep_days": 5})
+        self.a.HISTORY.write_text("")
+
+    def test_export_writes_every_dictation_oldest_first_by_day(self):
+        noon = self.a.datetime.datetime(2026, 10, 1, 12).timestamp()
+        entries = [{"ts": noon + 86400, "text": "Second day.", "kind": "note"}, {"ts": noon, "text": "First day."}]
+        path = self.a.export_history(entries, Path(self.temp.name) / "Downloads")
+        text = path.read_text()
+        self.assertLess(text.index("First day."), text.index("Second day."))
+        self.assertIn("## Thursday 1 October 2026", text)
+        self.assertIn("**12:00** · note", text)
+
+    def test_log_shows_word_counts_unless_dictations_are_logged(self):
+        self.assertEqual(self.a.logged("my private words"), "(3 words)")
+        self.config(log_text=True)
+        self.assertEqual(self.a.logged("my private words"), "my private words")
+
+    def test_rewrite_too_long_says_why(self):
+        handler = self.handler("/api/rewrite", {"text": "word " * 9000, "style": "grammar"})
+        handler.do_POST()
+        self.assertEqual(handler.reply.call_args.kwargs["status"], 400)
+        self.assertIn("too long", handler.reply.call_args.args[0]["error"])
+
+    def test_sections_cover_all_of_a_long_text_in_bounded_pieces(self):
+        text = " ".join(f"Sentence number {n} is here." for n in range(200))
+        parts = self.a.split_sections(text)
+        self.assertGreater(len(parts), 1)
+        self.assertTrue(all(len(p) <= 1000 for p in parts))
+        self.assertEqual(" ".join(parts), text)
+        self.assertEqual([len(p) for p in self.a.split_sections("x" * 2500)], [1000, 1000, 500])
+        self.assertEqual(self.a.split_sections("Short."), ["Short."])
+
+    def test_date_range_reads_the_days_a_question_is_about(self):
+        day = self.a.datetime.date
+        today = day(2026, 10, 17)  # a Saturday
+        cases = {"what did I say today": (today, today), "yesterday's notes": (day(2026, 10, 16),) * 2,
+                 "last week": (day(2026, 10, 5), day(2026, 10, 11)), "this week": (day(2026, 10, 12), today),
+                 "3 days ago": (day(2026, 10, 14),) * 2, "the last three days": (day(2026, 10, 15), today),
+                 "on Monday": (day(2026, 10, 12),) * 2, "on Saturday": (day(2026, 10, 10),) * 2,
+                 "last month": (day(2026, 9, 1), day(2026, 9, 30)), "what did I say about pricing": None}
+        for question, expected in cases.items():
+            self.assertEqual(self.a.date_range(question, today), expected, question)
+
+    def test_ask_answers_from_the_asked_day_and_from_deep_inside_long_entries(self):
+        now = self.a.time.time()
+        yesterday, older = now - 86400, now - 5 * 86400
+        long_text = "Filler sentence about nothing. " * 100 + "The budget is forty thousand."
+        entries = [{"ts": older, "text": "Pricing goes up in March."}, {"ts": yesterday, "text": long_text}]
+        with patch.object(self.a, "llm", return_value="It is forty thousand [1].") as llm:
+            result = self.a.ask("what did I say yesterday about the budget", entries, rank=self.a.by_keywords)
+        self.assertEqual({s["ts"] for s in result["sources"]}, {yesterday})
+        self.assertIn("forty thousand", llm.call_args.args[1])
+        self.assertNotIn("Pricing", llm.call_args.args[1])
+        with patch.object(self.a, "llm") as llm:
+            empty = self.a.ask("what did I say today", entries, rank=self.a.by_keywords)
+        llm.assert_not_called()
+        self.assertIn("no saved dictations from", empty["answer"])
+
 
 if __name__ == "__main__":
     unittest.main()
