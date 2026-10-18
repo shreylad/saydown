@@ -7,6 +7,7 @@ import argparse
 import importlib.util
 import json
 from pathlib import Path
+import re
 import statistics
 import subprocess
 import tempfile
@@ -74,7 +75,6 @@ def run(output):
             start = time.perf_counter()
             formatted = app.polish(raw)
             formatting_s = time.perf_counter() - start
-            import re
             bullets = len(re.findall(r'^- ', formatted, re.M))
             numbered = len(re.findall(r'^\d+\. ', formatted, re.M))
             style = 'bullets' if bullets else 'numbered' if numbered else 'prose'

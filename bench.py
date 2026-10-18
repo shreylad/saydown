@@ -47,7 +47,7 @@ for said, want in [("make that shorter","EDIT"),("fix the grammar","EDIT"),("und
  ("Make sure the report is shorter.","TYPE"),("Translate that to Spanish.","EDIT"),("Delete that.","UNDO"),("Let's make it happen.","TYPE")]:
     check("command", said, lambda s=said: dictate.command(s, two), lambda o, w=want: o == w)
 old = [{"ts": 1791000000.0, "text": "Pricing: we go with the freemium plan."}, {"ts": 1791086400.0, "text": "Remind me to call the dentist."}]
-check("ask", "by meaning", lambda: dictate.by_meaning(old + [{"ts": 1791172800.0, "text": "The cat sat on the mat."}], "how much will we charge", cache=None)[0]["text"], lambda o: o.startswith("Pricing"))
+check("ask", "by meaning", lambda: dictate.by_meaning([e | {"key": str(e["ts"])} for e in old + [{"ts": 1791172800.0, "text": "The cat sat on the mat."}]], "how much will we charge", cache=None)[0]["text"], lambda o: o.startswith("Pricing"))
 check("ask", "pricing plan", lambda: dictate.ask("Which pricing plan did I pick?", old, rank=dictate.by_keywords)["answer"], lambda o: "freemium" in o.lower() and "[1]" in o)
 check("ask", "not in history", lambda: dictate.ask("What is my flight number?", old, rank=dictate.by_keywords)["answer"], lambda o: len(o) < 200 and not any(c.isdigit() for c in __import__("re").sub(r"\[[\d, ]+\]", "", o)))
 print(f"===== {model}: {sum(r[2] for r in results)}/{len(results)} passed")

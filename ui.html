@@ -53,8 +53,6 @@
   #setup h2 { font-size: 17px; margin: 0 0 2px; }
   #setup h2 + p { margin: 0 0 6px; color: var(--muted); }
   #setup h3 { margin: 14px 0 0; font-size: 12px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
-  /* Settings remain available while recording permissions are pending. */
-  /* History and its Copy buttons stay available even when recording permissions are missing. */
   body.gate #setup { padding: 26px 28px; margin-top: 8px; }
   body.gate #setup h2 { font-size: 26px; letter-spacing: -0.02em; }
   .step { display: grid; grid-template-columns: 22px 1fr auto; gap: 10px; align-items: center; padding: 9px 0; }
@@ -745,10 +743,7 @@ $("#ask-form").onsubmit = async (event) => {
     card.replaceChildren(el("p", "error", error.message || "Could not reach the app."));
   }
 };
-$("#clear").onclick = () => {  // two-step confirm; native confirm() dialogs do not show in this window
-  if ($("#clear").dataset.armed) { delete $("#clear").dataset.armed; $("#clear").textContent = "Clear history"; post("/api/history/clear"); }
-  else { $("#clear").dataset.armed = "1"; $("#clear").textContent = "Click again to delete everything"; setTimeout(() => { delete $("#clear").dataset.armed; $("#clear").textContent = "Clear history"; }, 3000); }
-};
+confirmClick($("#clear"), "Clear history", "Click again to delete everything", () => post("/api/history/clear"));
 
 load();
 // pick up new dictations; more often while the setup card is counting a download

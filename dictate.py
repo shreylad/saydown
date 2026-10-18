@@ -81,8 +81,7 @@ OPENROUTER_MODELS = {
     "openai/gpt-4o-transcribe": "GPT-4o Transcribe",
 }
 SPEECH_CATALOG = {"openai": SPEECH_MODELS, "openrouter": OPENROUTER_MODELS}
-KEYCHAIN = "saydown-openai"
-KEYCHAINS = {"openai": KEYCHAIN, "openrouter": "saydown-openrouter"}
+KEYCHAINS = {"openai": "saydown-openai", "openrouter": "saydown-openrouter"}
 SPEECH_ENDPOINTS = {"openai": "https://api.openai.com/v1/audio/transcriptions",
                     "openrouter": "https://openrouter.ai/api/v1/audio/transcriptions"}
 speech_status = {"engine": "", "message": ""}
@@ -1089,7 +1088,7 @@ def embed(texts):
             embedder[:] = mlx_embeddings.load(paths[EMBED_MODEL])
         model, tokenizer = embedder
         for start in range(0, len(texts), 32):
-            batch = tokenizer([t[:1500] or " " for t in texts[start:start + 32]], return_tensors="mlx", padding=True,
+            batch = tokenizer([t or " " for t in texts[start:start + 32]], return_tensors="mlx", padding=True,
                               truncation=True, max_length=512)
             found = model(batch["input_ids"], attention_mask=batch["attention_mask"]).text_embeds
             vectors += np.array(found.astype(mx.float32)).tolist()
@@ -1184,7 +1183,7 @@ def relevant(entries, question, budget=6000, rank=by_keywords):
     ranked = rank(entries, question) or by_keywords(entries, question)
     picked, used = [], 0
     for entry in ranked:
-        used += min(len(entry["text"]), 1500)
+        used += len(entry["text"])
         if used > budget:
             break
         picked.append(entry)
@@ -1204,7 +1203,7 @@ def ask(question, entries, rank=by_meaning):
                 for e in entries for i, part in enumerate(split_sections(e["text"]))]
     sources = [{"n": n, "ts": s["ts"], "text": s["text"]}
                for n, s in enumerate(relevant(sections, question, rank=rank), 1)]
-    listing = "\n".join(f"[{s['n']}] {datetime.datetime.fromtimestamp(s['ts']):%A %Y-%m-%d %H:%M}: {s['text'][:1500]}"
+    listing = "\n".join(f"[{s['n']}] {datetime.datetime.fromtimestamp(s['ts']):%A %Y-%m-%d %H:%M}: {s['text']}"
                         for s in sources)
     answer = llm(f"{ASK_PROMPT}\n\nToday is {datetime.date.today():%A %Y-%m-%d}.",
                  f"<history>\n{listing}\n</history>\n\nQuestion: {question}", temperature=0)
@@ -1561,7 +1560,7 @@ def make_handler(on_settings_change, on_quit, on_note, taking_note, on_restart, 
                 elif self.path == "/api/copy":
                     if not isinstance(body["text"], str):
                         raise ValueError("bad text")
-                    subprocess.run("pbcopy", input=body["text"].encode(), check=True)
+                    copy(body["text"])
                 else:
                     return self.reply({"error": "not found"}, status=404)
             except StartupPending as error:
@@ -2218,7 +2217,6 @@ def main():
 
         shown, recheck, prune_at = idle(), 0.0, 0.0
         show(shown)
-        status["loading"] = False
         print(f"ready: hold {hotkey()['label']}, double-tap it, or click the pill to dictate")
         print("       right-click the pill for history, dictionary and settings; Ctrl+C to quit")
         while True:
