@@ -950,11 +950,12 @@ class SpeechTests(unittest.TestCase):
     def test_ask_answers_from_the_asked_day_and_from_deep_inside_long_entries(self):
         now = self.a.time.time()
         yesterday, older = now - 86400, now - 5 * 86400
-        long_text = "Filler sentence about nothing. " * 100 + "The budget is forty thousand."
+        long_text = "Filler sentence on nothing. " * 300 + "The budget is forty thousand."  # longer than the budget
         entries = [{"ts": older, "text": "Pricing goes up in March."}, {"ts": yesterday, "text": long_text}]
         with patch.object(self.a, "llm", return_value="It is forty thousand [1].") as llm:
             result = self.a.ask("what did I say yesterday about the budget", entries, rank=self.a.by_keywords)
         self.assertEqual({s["ts"] for s in result["sources"]}, {yesterday})
+        self.assertTrue(all(len(s["text"]) <= 1000 for s in result["sources"]))
         self.assertIn("forty thousand", llm.call_args.args[1])
         self.assertNotIn("Pricing", llm.call_args.args[1])
         with patch.object(self.a, "llm") as llm:
