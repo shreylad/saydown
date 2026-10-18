@@ -1305,7 +1305,21 @@ _ax.AXValueCreate.restype, _ax.AXValueCreate.argtypes = ctypes.c_void_p, [ctypes
 _ax.CFEqual.restype, _ax.CFEqual.argtypes = ctypes.c_bool, [ctypes.c_void_p, ctypes.c_void_p]
 
 
+_ax.AXUIElementGetPid.restype, _ax.AXUIElementGetPid.argtypes = ctypes.c_int32, [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int32)]
+
+
 def front_pid():
+    """The app with keyboard focus, asked of Accessibility, which is always current; NSWorkspace's answer is updated
+    only by a run loop and can lag behind an app switch."""
+    system = _ax.AXUIElementCreateSystemWide()
+    error, app = ax_get(system, "AXFocusedApplication")
+    _ax.CFRelease(system)
+    if not error:
+        pid = ctypes.c_int32()
+        error = _ax.AXUIElementGetPid(app, ctypes.byref(pid))
+        _ax.CFRelease(app)
+        if not error:
+            return pid.value
     front = AppKit.NSWorkspace.sharedWorkspace().frontmostApplication()
     return front.processIdentifier() if front else None
 
