@@ -51,10 +51,27 @@ $CC -O2 -fobjc-arc -framework Cocoa -framework WebKit -o "$APP/Contents/MacOS/Sa
 # a standalone Python and the packages dictate.py declares, copied into the app
 PYHOME="$("$("$UV" python find --managed-python 3.12)" -c 'import sys; print(sys.base_prefix)')"
 cp -R "$PYHOME" "$RES/python"
-"$UV" export -q --script "$HERE/dictate.py" --no-hashes > "$RES/requirements.txt"
+(cd "$HERE" && "$UV" export -q --script dictate.py --no-hashes) > "$RES/requirements.txt"
 "$UV" pip install -q --python "$RES/python/bin/python3" --target "$RES/site-packages" -r "$RES/requirements.txt"
 # mlx-whisper lists torch for converting models, which the app never does; it is half the download
 rm -rf "$RES"/site-packages/{torch,torch-*,torchgen,functorch,sympy,sympy-*,networkx,networkx-*,mpmath,mpmath-*,PyObjCTest,setuptools,setuptools-*}
+# the app is public: strip build paths that name this Mac's user (console scripts the app never runs,
+# the copied Python's build config and dylib id, and source paths baked into its .pyc files)
+rm -rf "$RES/site-packages/bin"
+sed -i '' "s#$PYHOME#/python#g" "$RES"/python/lib/python3.12/_sysconfigdata_*.py
+install_name_tool -id @rpath/libpython3.12.dylib "$RES/python/lib/libpython3.12.dylib" 2>/dev/null
+PYTHONDONTWRITEBYTECODE=1 "$RES/python/bin/python3" -B - "$RES/python" <<'EOF'
+import pathlib, py_compile, sys
+
+root = pathlib.Path(sys.argv[1])
+for pyc in root.rglob("__pycache__/*.pyc"):
+    src = pyc.parent.parent / (pyc.name.split(".")[0] + ".py")
+    if src.exists():
+        py_compile.compile(src, pyc, dfile=str(src.relative_to(root)), doraise=True)
+    else:
+        pyc.unlink()
+EOF
+if grep -rlq "$HOME" "$RES"; then echo "Build still contains $HOME:"; grep -rl "$HOME" "$RES"; exit 1; fi
 cp "$HERE/dictate.py" "$RES/dictate_bundled.py"
 cp "$HERE/runtime_bootstrap.py" "$RES/dictate.py"
 cp "$HERE/ui.html" "$RES/"
