@@ -19,7 +19,7 @@ A personal dictation app for Apple Silicon Macs. By default, speech is transcrib
 
 ## Install
 
-For an Apple Silicon Mac running macOS 14 or later. Nothing else needs to be installed first.
+For an Apple Silicon Mac running macOS 14 or later. Nothing else needs to be installed first. On Windows? See [Saydown for Windows](https://github.com/shreylad/saydown-windows).
 
 1. Download `Saydown.dmg` from the [latest release](https://github.com/shreylad/saydown/releases/latest), open it, and drag Saydown into Applications.
 2. Open Saydown. macOS will say it cannot verify the app, because it is not signed with an Apple developer account. Go to System Settings → Privacy & Security, scroll down, and click **Open Anyway**.
@@ -262,7 +262,7 @@ The first checks the settings and the text rules in about a second, with no mode
 - Dictating overwrites your clipboard.
 - The first dictation after about 30 idle minutes is slower while the model reloads.
 - Text appears when you release the key, not as you speak.
-- macOS on Apple Silicon only.
+- macOS on Apple Silicon only. For Windows, use [Saydown for Windows](https://github.com/shreylad/saydown-windows).
 
 ## Licence
 
