@@ -4,6 +4,9 @@ Run with the app's Python and site-packages, or `uv run --script dictate.py`
 dependencies installed in the current interpreter: python -m unittest test_speech -v.
 """
 import importlib.util
+import inspect
+import sys
+from contextlib import ExitStack
 import io
 import json
 import tempfile
@@ -37,6 +40,203 @@ class SpeechTests(unittest.TestCase):
             cached[:] = [0.0, False]
         self.audio = self.a.np.ones(1600, dtype=self.a.np.float32) * 0.1
         self.local = Mock(return_value={"text": "local words", "segments": []})
+        no_parakeet = patch.object(self.a, "PARAKEET_LANGUAGES", set())  # these tests drive the Whisper path
+        no_parakeet.start()
+        self.addCleanup(no_parakeet.stop)
+
+    def speech(self, *parts):
+        """Synthetic audio: (seconds, loud) parts, loud ones as noise at speaking level, the rest near silence."""
+        np = self.a.np
+        rng = np.random.default_rng(0)
+        return np.concatenate([rng.normal(0, 0.2 if loud else 0.002, int(s * self.a.RATE)).astype(np.float32)
+                               for s, loud in parts])
+
+    def test_parakeet_for_its_languages_whisper_for_the_rest(self):
+        model = Mock()
+        model.generate.return_value.text = "fast words"
+        with patch.object(self.a, "PARAKEET_LANGUAGES", {"en"}), patch.object(self.a, "parakeet", [model]):
+            self.assertEqual(self.a.transcribe(self.audio, "en", self.local), ({"text": "fast words", "segments": []}, "parakeet"))
+            self.assertEqual(self.a.transcribe(self.audio, "hi", self.local)[1], "local")
+            self.assertEqual(self.a.transcribe(self.audio, None, self.local)[1], "local")
+        self.assertEqual(model.generate.call_count, 1)
+        self.assertEqual(self.local.call_count, 2)
+
+    def test_parakeet_phrases_with_spoken_numbers_are_heard_again_by_whisper(self):
+        model = Mock()
+        model.generate.return_value.text = "call me at nine forty five AM"
+        with patch.object(self.a, "PARAKEET_LANGUAGES", {"en"}), patch.object(self.a, "parakeet", [model]):
+            self.assertEqual(self.a.transcribe(self.audio, "en", self.local)[1], "local")
+            model.generate.return_value.text = "no one is here"
+            self.assertEqual(self.a.transcribe(self.audio, "en", self.local)[1], "parakeet")
+        self.assertEqual(self.local.call_count, 1)
+
+    def test_only_the_corrected_sentence_and_the_one_before_go_to_the_model(self):
+        raw = ("Good morning. Revenue was up 12.5%. Is this working? The forecast for Q4 looks strong, wait, no, "
+               "I mean Q1. Call me before 3.45 pm.")
+        with patch.object(self.a, "clean", return_value="Fixed.") as clean:
+            self.assertEqual(self.a.polish(raw), "Good morning. Revenue was up 12.5%. Fixed. Call me before 3:45 pm.")
+        clean.assert_called_once_with("Is this working? The forecast for Q4 looks strong, wait, no, I mean Q1.")
+
+    def test_punctuation_and_breaks_said_aloud_are_written(self):
+        raw = ("It works. New paragraph is this working question mark, yes, comma, it is exclamation mark. "
+               "New line. email sri at srila dot com")
+        self.assertEqual(self.a.polish(raw), "It works.\n\nIs this working? Yes, it is!\nEmail sri at srila.com")
+        for text in ["We need a new line of credit.", "New line items were added.", "Start a new paragraph here.",
+                     "Commas and full stops matter."]:
+            self.assertEqual(self.a.polish(text), text)
+
+    def test_dollar_amounts_with_cents_are_joined_without_a_model(self):
+        cases = {
+            "Revenue was $48,375. and 62 cents.": "Revenue was $48,375.62.",
+            "$48,375 and 62 cents": "$48,375.62",
+            "It cost $5, and 2 cents!": "It cost $5.02!",
+            "It cost $5. And 1 cent.": "It cost $5.01.",
+            "It cost $0 and 05 cents.": "It cost $0.05.",
+            "It cost $5000 and 99 cents.": "It cost $5000.99.",
+            "Refund -$12 and 50 cents.": "Refund -$12.50.",
+            "Pay $1 and 2 cents, then $3 and 4 cents.": "Pay $1.02, then $3.04.",
+            "It cost $5 comma and 2 cents.": "It cost $5.02.",
+        }
+        with patch.object(self.a, "llm") as llm:
+            for raw, expected in cases.items():
+                with self.subTest(raw=raw):
+                    self.assertEqual(self.a.polish(raw), expected)
+                    self.assertEqual(self.a.polish(expected), expected)
+            llm.assert_not_called()
+
+    def test_money_rule_preserves_decimals_and_ambiguous_amounts(self):
+        for text in ["It cost $48,375.62.", "Pay $5.50 and 20 cents.", "Pay $5 and 100 cents.",
+                     "Pay $5 and 2.5 cents.", "Pay $5 and 2 percent.", "Pay 5 and 20 cents.",
+                     "Pay $1,23 and 45 cents.", "Pay $5.\n\nAnd 20 cents for postage."]:
+            with self.subTest(text=text):
+                self.assertEqual(self.a.polish(text), text)
+
+    def test_money_is_joined_before_selecting_self_correction_sentences(self):
+        raw = "Revenue was $48,375. and 62 cents. Wait, I mean $50,000."
+        with patch.object(self.a, "clean", return_value="Revenue was $50,000.") as clean:
+            self.assertEqual(self.a.polish(raw), "Revenue was $50,000.")
+        clean.assert_called_once_with("Revenue was $48,375.62. Wait, I mean $50,000.")
+
+    def test_pause_at_cuts_only_in_a_real_pause_after_a_full_phrase(self):
+        rate = self.a.RATE
+        self.assertIsNone(self.a.pause_at(self.speech((3, True), (0.5, False), (2, True)), 0))  # pause too early
+        self.assertIsNone(self.a.pause_at(self.speech((8, True)), 0))  # no pause yet
+        self.assertIsNone(self.a.pause_at(self.speech((6, True), (0.1, False), (2, True)), 0))  # a breath, not a pause
+        cut = self.a.pause_at(self.speech((6, True), (0.6, False), (2, True)), 0)
+        self.assertTrue(6 * rate <= cut <= 6.6 * rate, cut / rate)
+        audio = self.speech((6, True), (0.6, False), (6, True), (0.6, False), (1, True))
+        second = self.a.pause_at(audio, cut)
+        self.assertTrue(12.6 * rate <= second <= 13.2 * rate, second / rate)
+
+    def test_phrases_are_transcribed_while_recording_and_joined_at_the_end(self):
+        audio = self.speech((6, True), (0.6, False), (6, True), (0.6, False), (2, True))
+        heard = []
+        self.local.side_effect = lambda clip, **_: heard.append(len(clip)) or {"text": f"part{len(heard)}", "segments": []}
+        with tempfile.NamedTemporaryFile(suffix=".f32", delete=False) as f:
+            f.write(audio.tobytes() + b"\x00\x00")  # a sample only half written
+        phrases = self.a.Phrases(f.name, "en", self.local)
+        deadline = self.a.time.time() + 5
+        while len(heard) < 2 and self.a.time.time() < deadline:
+            self.a.time.sleep(0.05)
+        self.assertEqual(len(heard), 2)  # both pauses were used before the key went up
+        whole = phrases.end()
+        self.assertFalse(Path(f.name).exists())
+        self.assertEqual(len(whole), len(audio))
+        self.assertEqual(phrases.finish(whole), ("part1 part2 part3", "local"))
+        self.assertEqual(sum(heard), len(audio))  # every sample transcribed once
+
+    def test_phrases_fall_back_to_the_whole_recording(self):
+        audio = self.speech((6, True), (0.6, False), (2, True))
+        with tempfile.NamedTemporaryFile(suffix=".f32", delete=False) as f:
+            f.write(audio.tobytes())
+        self.local.side_effect = [RuntimeError("model gone"), {"text": "everything", "segments": []}]
+        phrases = self.a.Phrases(f.name, "en", self.local)
+        phrases.thread.join(5)  # the failure ends the watcher
+        self.assertTrue(phrases.failed)
+        self.assertEqual(phrases.finish(phrases.end())[0], "everything")
+        self.assertEqual(len(self.local.call_args.args[0]), len(audio))
+
+    def test_app_waits_for_ready_and_recovers_after_failed_start(self):
+        app = self.app
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        root = Path(temp.name)
+        pending = []
+        executor = Mock()
+        executor.submit.side_effect = pending.append
+        show, pieces, jobs, process = Mock(), Mock(), Mock(), Mock()
+        process.poll.return_value = None
+        app.status.update(loading=False, mic=True, speech_error="")
+        with ExitStack() as stack:
+            stack.enter_context(patch.dict(sys.modules, mlx_whisper=Mock()))
+            for name in ("ThreadingHTTPServer", "request_keyboard_access", "make_card", "close_recorder"):
+                replacement = Mock(return_value=(True, True)) if name == "request_keyboard_access" else Mock()
+                stack.enter_context(patch.object(app, name, replacement))
+            stack.enter_context(patch.object(app, "ThreadPoolExecutor", return_value=executor))
+            threads = stack.enter_context(patch.object(app.threading, "Thread"))
+            stack.enter_context(patch.object(app.queue, "Queue", return_value=jobs))
+            stack.enter_context(patch.object(app.AppKit, "NSApplication", Mock()))
+            stack.enter_context(patch.object(app.webbrowser, "open"))
+            stack.enter_context(patch.object(app, "microphone_allowed", return_value=True))
+            stack.enter_context(patch.object(app.Quartz, "CGEventTapCreate", return_value=None))
+            pill = stack.enter_context(patch.object(app, "make_pill", return_value=show))
+            opened = stack.enter_context(patch.object(app, "open_recorder", side_effect=[RuntimeError("test microphone failure"), None]))
+            spawned = stack.enter_context(patch.object(app, "spawn_recorder", return_value=(process, str(root / "audio"))))
+            phrases = stack.enter_context(patch.object(app, "Phrases", return_value=pieces))
+
+            def drive():
+                click = pill.call_args.args[0]
+                click()
+                opened.assert_not_called()  # UI callbacks enqueue device work and return immediately.
+                pending.pop(0)()
+                phrases.assert_not_called()
+                jobs.put.assert_not_called()
+                show.assert_called_with("Microphone unavailable")
+                self.assertNotIn(unittest.mock.call("handsfree"), show.call_args_list)
+                self.assertEqual(spawned.call_count, 2)
+                click()
+                pending.pop(0)()
+                phrases.assert_called_once()
+                show.assert_called_with("handsfree")
+                click()
+                pending.pop(0)()
+                jobs.put.assert_called_once_with((pieces, False))
+                self.assertIsNotNone(pieces.released_at)
+                self.assertGreaterEqual(pieces.queued_at, pieces.released_at)
+
+                # Run the real dictation callback with controlled time and delivery, including time spent queued.
+                worker = next(c.kwargs["target"] for c in threads.call_args_list
+                              if getattr(c.kwargs.get("target"), "__name__", "") == "worker")
+                dictate = inspect.getclosurevars(worker).nonlocals["dictate"]
+                pieces.released_at, pieces.queued_at, pieces.done = 10.0, 10.2, 0
+                pieces.end.return_value = app.np.ones(app.RATE, dtype=app.np.float32)
+                pieces.finish.return_value = ("Ready to send.", "parakeet")
+                output = io.StringIO()
+                with patch.object(app.time, "perf_counter", side_effect=[11.0, 11.1, 11.5, 11.6, 11.7, 11.8]), \
+                     patch.object(app, "polish", return_value="Ready to send."), \
+                     patch.object(app, "deliver", return_value=False), \
+                     patch.object(app, "settings", return_value=app.DEFAULTS | {"save_history": False}), \
+                     patch("sys.stdout", output):
+                    dictate(pieces, False)
+                self.assertIn("stop=0.200s queue=0.800s speech=0.100s cleanup=0.400s", output.getvalue())
+                self.assertIn("delivery=0.100s tracking=0.100s to_delivery=1.600s total=1.700s", output.getvalue())
+                self.assertNotIn("Ready to send", output.getvalue())
+
+            stack.enter_context(patch.object(app.AppHelper, "runEventLoop", side_effect=lambda **_: drive()))
+            app.main()
+
+    def test_focus_check_keeps_the_shared_system_element_and_preserves_paste_fallback(self):
+        front = Mock()
+        front.processIdentifier.return_value = 123
+        with patch.object(self.a.AppKit, "NSWorkspace", Mock()) as workspace, \
+             patch.object(self.a._ax, "AXUIElementCreateApplication", return_value=99), \
+             patch.object(self.a._ax, "CFRelease") as release, \
+             patch.object(self.a._ax, "AXUIElementSetAttributeValue", return_value=-25204), \
+             patch.object(self.a, "ax_get", return_value=(-25212, None)) as ax_get:
+            workspace.sharedWorkspace.return_value.frontmostApplication.return_value = front
+            self.assertIsNone(self.a.typing_spot())
+        self.assertEqual(ax_get.call_args.args[0], self.a._system)
+        self.assertEqual([c.args[0] for c in release.call_args_list], [99])  # never the shared element
 
     def config(self, **values):
         self.a.SETTINGS.write_text(json.dumps(self.a.DEFAULTS | values))
@@ -183,6 +383,22 @@ class SpeechTests(unittest.TestCase):
             self.assertEqual(engine, f"openrouter:{model}")
             self.assertEqual(hear.call_args.kwargs, {"model": model, "provider": "openrouter"})
             self.assertIn("via OpenRouter", self.a.speech_status["message"])
+        self.local.assert_not_called()
+
+    def test_deepinfra_speech_and_text_use_the_deepinfra_key(self):
+        self.config(speech_provider="deepinfra", text_provider="deepinfra", ai_features=True)
+        with patch.object(self.a, "cloud_key", return_value="infra-secret") as key, patch.object(self.a, "hear", return_value="Infra words") as hear:
+            result, engine = self.a.transcribe(self.audio, "en", self.local)
+        key.assert_called_once_with("deepinfra")
+        self.assertEqual((result["text"], engine), ("Infra words", "deepinfra:openai/whisper-large-v3-turbo"))
+        self.assertEqual(hear.call_args.kwargs["provider"], "deepinfra")
+        reply = io.BytesIO(b'{"choices":[{"message":{"content":" Cleaned. "}}]}')
+        with patch.object(self.a, "cloud_key", return_value="infra-secret"), patch.object(self.a.urllib.request, "urlopen", return_value=reply) as call:
+            self.assertEqual(self.a.llm("system", "user words"), "Cleaned.")  # no local model needed
+        request = call.call_args.args[0]
+        self.assertEqual(request.full_url, self.a.TEXT_APIS["deepinfra"][0])
+        self.assertEqual(request.get_header("Authorization"), "Bearer infra-secret")
+        self.assertEqual(json.loads(request.data)["model"], self.a.TEXT_APIS["deepinfra"][1])
         self.local.assert_not_called()
 
     def test_openrouter_request_uses_router_url_and_namespaced_models(self):
@@ -409,9 +625,9 @@ class SpeechTests(unittest.TestCase):
 
     def test_self_correction_is_cleaned_before_list_formatting(self):
         raw = "First send it Tuesday, I mean Wednesday. Second archive it."
-        with patch.object(self.a, "clean", return_value="First send it Wednesday. Second archive it.") as clean:
+        with patch.object(self.a, "clean", return_value="First send it Wednesday.") as clean:
             self.assertEqual(self.a.polish(raw), "1. Send it Wednesday.\n2. Archive it.")
-        clean.assert_called_once_with(raw)
+        clean.assert_called_once_with("First send it Tuesday, I mean Wednesday.")
 
     def test_list_formatting_preserves_dictionary_spellings(self):
         with patch.object(self.a, "term_list", return_value=["apple tree -> AppleTree"]):

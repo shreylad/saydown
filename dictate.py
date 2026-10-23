@@ -10,8 +10,9 @@
 Run:  uv run dictate.py          (the first run downloads the models)
 Test: uv run dictate.py --test   (checks the settings and the text rules; bench.py checks the model)
 """
-import ctypes, datetime, difflib, io, json, math, os, queue, random, re, ssl, subprocess, sys, tempfile, threading, time, traceback, urllib.request, uuid, wave, webbrowser
+import ctypes, datetime, difflib, io, itertools, json, math, os, queue, random, re, select, ssl, subprocess, sys, tempfile, threading, time, traceback, urllib.request, uuid, wave, webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import AppKit
@@ -67,6 +68,13 @@ FILLERS = re.compile(r"(?<![-\w'’\"“])(?-i:(?![A-Z]{2,}\b))(?:u+h*m+|u+h+|e+
 # "the the the", "I I"; letters only, so the digits of a spoken number ("5 5 5") are kept
 STUTTER = re.compile(r"\b([^\W\d_]+)(?:,?\s+\1\b){2,}|\b(I)(?:,?\s+I\b)+", re.I)
 WHISPER = "mlx-community/whisper-large-v3-turbo"
+# 2-4x faster than Whisper on a Mac (0.05 s for 5 s of speech) and writes nothing for silence, but knows only European
+# languages; Whisper still does "auto" and the rest. Runs through mlx_audio, already in the bundle.
+PARAKEET = "mlx-community/parakeet-tdt-0.6b-v3"
+PARAKEET_LANGUAGES = {"en", "es", "fr", "de", "pt", "it", "nl"}
+# Parakeet spells these out ("nine forty five AM") where Whisper writes "9:45 AM"; "one" is left out, being too common
+NUMBER_WORDS = re.compile(r"\b(?:two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|(?:thir|four|fif|six|seven|eigh|nine)teen"
+                          r"|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|million|billion|percent|zero)\b", re.I)
 SPEECH_MODELS = {
     "gpt-transcribe": "GPT Transcribe (recommended)",
     "gpt-4o-mini-transcribe": "GPT-4o Mini Transcribe (legacy)",
@@ -80,10 +88,22 @@ OPENROUTER_MODELS = {
     "openai/gpt-4o-mini-transcribe": "GPT-4o Mini Transcribe",
     "openai/gpt-4o-transcribe": "GPT-4o Transcribe",
 }
-SPEECH_CATALOG = {"openai": SPEECH_MODELS, "openrouter": OPENROUTER_MODELS}
-KEYCHAINS = {"openai": "saydown-openai", "openrouter": "saydown-openrouter"}
+DEEPINFRA_MODELS = {"openai/whisper-large-v3-turbo": "Whisper Large V3 Turbo"}  # $0.0002 a minute
+SPEECH_CATALOG = {"openai": SPEECH_MODELS, "openrouter": OPENROUTER_MODELS, "deepinfra": DEEPINFRA_MODELS}
+SPEECH_LABELS = {"openai": "OpenAI", "openrouter": "OpenRouter", "deepinfra": "DeepInfra"}
+SPEECH_PROVIDERS = ("local", *SPEECH_CATALOG)
+KEYCHAINS = {"openai": "saydown-openai", "openrouter": "saydown-openrouter", "deepinfra": "saydown-deepinfra"}
 SPEECH_ENDPOINTS = {"openai": "https://api.openai.com/v1/audio/transcriptions",
-                    "openrouter": "https://openrouter.ai/api/v1/audio/transcriptions"}
+                    "openrouter": "https://openrouter.ai/api/v1/audio/transcriptions",
+                    "deepinfra": "https://api.deepinfra.com/v1/openai/audio/transcriptions"}
+# Cleanup, rewrites and Ask can run in the cloud instead of on the Mac: a bigger Gemma, ~$0.08/$0.30 per million tokens.
+# Each provider: chat endpoint, model, and extra request fields: reasoning off (it adds seconds for no gain here), and
+# OpenRouter held to DeepInfra, since it otherwise picks any host it likes for each request
+TEXT_APIS = {"openrouter": ("https://openrouter.ai/api/v1/chat/completions", "google/gemma-4-26b-a4b-it",
+                            {"reasoning": {"enabled": False}, "provider": {"only": ["deepinfra"]}}),
+             "deepinfra": ("https://api.deepinfra.com/v1/openai/chat/completions", "google/gemma-4-26B-A4B-it",
+                           {"chat_template_kwargs": {"enable_thinking": False}})}
+TEXT_PROVIDERS = ("local", *TEXT_APIS)
 speech_status = {"engine": "", "message": ""}
 _key_status = {provider: [0.0, False] for provider in KEYCHAINS}
 _key_cache = {}  # secrets stay in process memory; None means access was denied this session
@@ -92,7 +112,7 @@ _key_lock = threading.RLock()
 # bench.py before changing it: the 5-bit build passes all 42 checks, the 4-bit one misses two.
 TEXT_MODEL = "mlx-community/gemma-4-e4b-it-5bit"
 EMBED_MODEL = "mlx-community/embeddinggemma-300m-4bit"  # 0.2 GB; without it Ask falls back to keyword matching
-IDLE = 1800  # seconds unused before the text model, about 5 GB of memory, is dropped; loading it again takes ~3s
+IDLE = 4 * 3600  # seconds unused before the text model, about 5 GB of memory, is dropped; loading it again takes ~3s
 mlx_lock = threading.Lock()  # MLX does one thing at a time: transcribing, writing or embedding
 paths = {}  # model repository -> its folder on disk, once setup_ai() has made sure all of it is there
 text_model, embedder, unload_timer = {}, [], [None]  # what is in memory now
@@ -119,6 +139,7 @@ DEFAULTS = {
     "microphone": "",  # an input device name, or "" for the system default
     "language": "auto",
     "speech_provider": "local",
+    "text_provider": "local",  # where cleanup, rewrites and Ask run: "local", or a TEXT_APIS provider and its key
     "speech_model": "gpt-transcribe",
     "openrouter_model": "openai/whisper-large-v3-turbo",
     "voice_commands": False,  # "make that shorter" / "undo that" right after a dictation edits it in place
@@ -190,11 +211,10 @@ Rules (these override the style if they conflict):
 - Output only the rewritten text: no preamble, quotes, or explanation."""
 
 
-# The microphone is read by a helper process that is killed to end a recording. Stopping a PortAudio stream on
-# macOS can deadlock inside CoreAudio, which froze the whole app; a killed process cannot take the app with it.
-# It waits for one line on stdin (the microphone name, or empty for the default) and then records to argv[1].
+# Isolate CoreAudio in a helper: closing a stream can deadlock on macOS. The parent gives it a short deadline
+# before killing it. stdout acknowledges a successful start; closing stdin requests a clean stop.
 RECORDER = """
-import os, sys
+import os, sys, time
 import sounddevice as sd
 name = sys.stdin.readline()
 if not name:
@@ -203,14 +223,70 @@ name = name.strip()
 device = next((i for i, d in enumerate(sd.query_devices())
                if d["name"] == name and d["max_input_channels"] > 0), None)
 if name and device is None:
-    print(f"microphone {name!r} not found, using the system default", flush=True)
-out = open(sys.argv[1], "wb", buffering=0)
-stream = sd.RawInputStream(device=device, samplerate=int(sys.argv[2]), channels=1, dtype="float32",
-                           callback=lambda data, *_: out.write(data))
-stream.start()
-sys.stdin.read()  # returns only if Saydown goes away
+    print(f"microphone {name!r} not found, using the system default", file=sys.stderr, flush=True)
+with open(sys.argv[1], "wb", buffering=0) as out:
+    for attempt in range(3):
+        stream = None
+        try:
+            stream = sd.RawInputStream(device=device, samplerate=int(sys.argv[2]), channels=1, dtype="float32",
+                                       callback=lambda data, *_: out.write(data))
+            stream.start()
+            break
+        except sd.PortAudioError as error:
+            if stream is not None:
+                stream.close()
+            if len(error.args) < 2 or error.args[1] != -9986 or attempt == 2:
+                raise
+            print(f"microphone temporarily unavailable; retry {attempt + 1}/2", file=sys.stderr, flush=True)
+            time.sleep(0.1 * (attempt + 1))
+    print("ready", flush=True)
+    try:
+        sys.stdin.read()
+    finally:
+        try:
+            stream.stop()
+        finally:
+            stream.close()
 os._exit(0)
 """
+
+
+def spawn_recorder():
+    """Preload the helper without opening the microphone until a dictation starts."""
+    fd, path = tempfile.mkstemp(suffix=".f32")
+    os.close(fd)
+    try:
+        process = subprocess.Popen([sys.executable, "-B", "-c", RECORDER, path, str(RATE)],
+                                   stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+    except OSError:
+        Path(path).unlink(missing_ok=True)
+        raise
+    return process, path
+
+
+def open_recorder(process, microphone, timeout=2.0):
+    process.stdin.write(microphone.encode() + b"\n")
+    process.stdin.flush()
+    readable, _, _ = select.select([process.stdout], [], [], timeout)
+    if not readable or process.stdout.readline() != b"ready\n":
+        raise RuntimeError("Could not open the microphone. Try again or choose another microphone in Settings.")
+
+
+def close_recorder(process):
+    """Release the device normally, but keep a stuck driver from freezing dictation."""
+    try:
+        process.stdin.close()
+    except OSError:
+        pass
+    try:
+        process.wait(timeout=0.3)
+    except subprocess.TimeoutExpired:
+        print("microphone did not close in 0.3s; stopping its helper")
+        process.kill()
+        process.wait()
+    finally:
+        process.stdout.close()
+
 
 # a free-text instruction, typed in the window or spoken as a voice command
 EDIT_PROMPT = """You edit text by following one instruction from its author.
@@ -280,8 +356,10 @@ def settings():
         mtime = SETTINGS.stat().st_mtime
         if _cached[0] != mtime:
             saved = DEFAULTS | json.loads(SETTINGS.read_text())
-            if saved["speech_provider"] not in ("local", "openai", "openrouter"):
+            if saved["speech_provider"] not in SPEECH_PROVIDERS:
                 saved["speech_provider"] = "local"
+            if saved["text_provider"] not in TEXT_PROVIDERS:
+                saved["text_provider"] = "local"
             if saved["speech_model"] not in SPEECH_MODELS:
                 saved["speech_model"] = DEFAULTS["speech_model"]
             if saved["openrouter_model"] not in OPENROUTER_MODELS:
@@ -471,7 +549,7 @@ def valid_settings(body):
             raise ValueError("bad keep_days")
         new["keep_days"] = body["keep_days"]
     for key, choices in (("language", LANGUAGES), ("microphone", ["", *microphones()]),
-                         ("speech_provider", ("local", "openai", "openrouter")),
+                         ("speech_provider", SPEECH_PROVIDERS), ("text_provider", TEXT_PROVIDERS),
                          ("pill_position", PILL_POSITIONS), ("speech_model", SPEECH_MODELS), ("openrouter_model", OPENROUTER_MODELS)):
         if key in body:
             if not isinstance(body[key], str) or body[key] not in choices:
@@ -542,11 +620,16 @@ def request_keyboard_access():
 
 def load_local_speech(local):
     """An unavailable local model must not strand the worker or prevent API dictation."""
+    language = settings()["language"]
     try:
         with mlx_lock:
-            local(np.zeros(RATE, np.float32), path_or_hf_repo=WHISPER)
+            # noise, not silence: silence decodes no words, which left the first dictation ~1.5s slower
+            noise = np.random.default_rng(0).normal(0, 0.1, RATE).astype(np.float32)
+            listen_locally(noise, None if language == "auto" else language, local)
+            local(noise, path_or_hf_repo=WHISPER)  # also redoes Parakeet's phrases with numbers
         status["speech_error"] = ""
     except Exception:
+        traceback.print_exc()
         status["speech_error"] = "Local speech model could not load. Check your connection and restart Saydown, or select an API provider."
         print(status["speech_error"])
     status["loading"] = False
@@ -591,7 +674,11 @@ def ai_on():
     """Whether the text and search models are wanted. Until chosen in Settings: only if they are already on disk, so a
     new install starts with plain dictation and an existing one keeps what it had."""
     chosen = settings()["ai_features"]
-    return chosen if isinstance(chosen, bool) else downloaded(TEXT_MODEL)
+    return chosen if isinstance(chosen, bool) else cloud_text() or downloaded(TEXT_MODEL)
+
+
+def cloud_text():
+    return settings()["text_provider"] != "local"
 
 
 _ai_setup = threading.Lock()
@@ -607,11 +694,12 @@ def setup_ai():
     if not _ai_setup.acquire(blocking=False):  # already under way, from launch or an earlier switch in Settings
         return
     try:
-        for repo in (TEXT_MODEL, EMBED_MODEL):
+        for repo in (EMBED_MODEL,) if cloud_text() else (TEXT_MODEL, EMBED_MODEL):
             if repo not in paths:
                 paths[repo] = fetch(repo, note)
-        note("starting")
-        llm("Reply with OK.", "warm up", max_tokens=1)
+        if not cloud_text():
+            note("starting")
+            llm("Reply with OK.", "warm up", max_tokens=1)
         note("ready" if ai_on() else "off")
     except Exception as e:  # dictation works without any of this; the window says what went wrong
         print("AI setup failed:", e)
@@ -634,6 +722,8 @@ def llm(system, user, max_tokens=2048, temperature=1.0):
     from mlx_lm.sample_utils import make_sampler
     if not ai_on():
         raise OSError("AI features are off")
+    if cloud_text():
+        return cloud_llm(system, user, max_tokens, temperature)
     if TEXT_MODEL not in paths:  # never download here: a dictation would wait minutes for it
         raise OSError("the AI model is not downloaded yet")
     # ponytail: one lock, so a dictation waits behind a long rewrite; give the models a queue if that bites
@@ -651,6 +741,28 @@ def llm(system, user, max_tokens=2048, temperature=1.0):
             add_generation_prompt=True, enable_thinking=False)  # reasoning adds ~10s per call for no gain here
         sampler = make_sampler(temp=temperature, top_p=0.95, top_k=64)  # the sampling Gemma is published with
         return mlx_lm.generate(model, tokenizer, prompt=prompt, max_tokens=max_tokens, sampler=sampler).strip()
+
+
+def cloud_llm(system, user, max_tokens, temperature):
+    """The same call as llm(), answered by the chosen provider. Raises, so cleanup falls back to tidying by rule."""
+    import certifi
+    provider = settings()["text_provider"]
+    url, model, extra = TEXT_APIS[provider]
+    key = cloud_key(provider)
+    if not key:
+        raise OSError(f"no {SPEECH_LABELS[provider]} key is saved")
+    body = json.dumps({"model": model, "max_tokens": max_tokens, "temperature": temperature, "top_p": 0.95,
+                       "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}]}
+                      | extra).encode()
+    request = urllib.request.Request(url, body, {
+        "Authorization": f"Bearer {key}", "Content-Type": "application/json"})
+    with urllib.request.urlopen(request, timeout=30, context=ssl.create_default_context(cafile=certifi.where())) as reply:
+        data = json.load(reply)
+        text = data["choices"][0]["message"]["content"]
+    print(f"text by {provider}:{data.get('model', model)} via {data.get('provider', provider)}")  # OpenRouter names its host
+    if not isinstance(text, str):
+        raise ValueError("the text API returned no text")
+    return text.strip()
 
 
 KEYCHAIN_DENIED = "Keychain access was denied. Save your API key again in Settings or restart Saydown to retry."
@@ -781,7 +893,9 @@ def hear(audio, key, language=None, prompt=None, model="gpt-transcribe", provide
         "Authorization": f"Bearer {key}", "Content-Type": f"multipart/form-data; boundary={edge}"})
     # ponytail: one whole-clip request; stream the audio while speaking if long dictations feel slow
     with urllib.request.urlopen(request, timeout=30, context=ssl.create_default_context(cafile=certifi.where())) as reply:
-        text = json.load(reply).get("text")
+        data = json.load(reply)
+        text = data.get("text")
+        print(f"speech by {provider}:{model}", {k: v for k, v in data.items() if k not in ("text", "segments", "words")})
         if not isinstance(text, str):
             raise ValueError("The speech API returned an invalid transcript")
         return text
@@ -790,18 +904,19 @@ def hear(audio, key, language=None, prompt=None, model="gpt-transcribe", provide
 def transcribe(audio, language, local):
     """Use the selected service and always preserve the local fallback."""
     selected = settings()
-    speech_status.update(engine="local", message="Using Whisper on this Mac.")
+    speech_status.update(engine="local", message=f"Using {'Parakeet' if language in PARAKEET_LANGUAGES else 'Whisper'} on this Mac.")
     provider = selected["speech_provider"]
     if provider in SPEECH_CATALOG:
-        model = selected["openrouter_model" if provider == "openrouter" else "speech_model"]
-        label = "OpenRouter" if provider == "openrouter" else "OpenAI"
+        model = {"openai": selected["speech_model"], "openrouter": selected["openrouter_model"]}.get(
+            provider, next(iter(SPEECH_CATALOG[provider])))
+        label = SPEECH_LABELS[provider]
         try:
             key = cloud_key(provider)
             if not key:
-                speech_status["message"] = f"No {label} key is saved. Used local Whisper; add your key in Settings."
+                speech_status["message"] = f"No {label} key is saved. Used local speech; add your key in Settings."
             else:
                 text = hear(audio, key, language, terms(), model=model, provider=provider)
-                engine = f"openrouter:{model}" if provider == "openrouter" else model
+                engine = model if provider == "openai" else f"{provider}:{model}"
                 speech_status.update(engine=engine, message=f"Transcribed with {SPEECH_CATALOG[provider][model]} via {label}.")
                 return {"text": text, "segments": []}, engine
         except Exception as error:
@@ -812,10 +927,105 @@ def transcribe(audio, language, local):
                 reason = "Keychain access was denied; save your API key again in Settings or restart Saydown to retry"
             if isinstance(error, ValueError) and len(audio) * 2 + 44 > 24_000_000:
                 reason = "Recording exceeds the API upload limit"
-            speech_status["message"] = f"{reason}. Used local Whisper instead."
+            speech_status["message"] = f"{reason}. Used local speech instead."
             print(speech_status["message"])
+    waiting = time.perf_counter()
     with mlx_lock:
-        return local(audio, path_or_hf_repo=WHISPER, initial_prompt=terms() or None, language=language), "local"
+        waited = time.perf_counter() - waiting
+        if waited >= 0.05:
+            print(f"speech waited for model lock: {waited:.3f}s")
+        return listen_locally(audio, language, local)
+
+
+PIECE = 5  # seconds: the shortest phrase transcribed on its own; shorter ones lose the context that gets words right
+PAUSE = 0.3  # seconds of quiet that separate two phrases
+
+
+def recorded(path):
+    """The audio in a recorder's file so far; the recorder may be halfway through writing a sample."""
+    data = Path(path).read_bytes()
+    return np.frombuffer(data[:len(data) // 4 * 4], np.float32)
+
+
+def pause_at(audio, start):
+    """The middle of the first pause at least PIECE seconds after start, where the recording can be cut; or None."""
+    frame, need = RATE // 20, int(PAUSE * 20)  # 50 ms frames
+    if len(audio) - start < (PIECE + PAUSE) * RATE:
+        return None
+    n = (len(audio) - start) // frame
+    loud = np.sqrt(np.mean(audio[start:start + n * frame].reshape(n, frame) ** 2, axis=1))
+    # quiet relative to how loud this speaker is, so it works for any microphone
+    quiet = (loud < 0.15 * np.percentile(loud, 90)).astype(int)
+    runs = np.flatnonzero(np.convolve(quiet, np.ones(need, int), "valid") == need)
+    runs = runs[runs >= PIECE * 20]
+    return start + (int(runs[0]) + need // 2) * frame if len(runs) else None
+
+
+class Phrases:
+    """Transcribes a recording phrase by phrase while it is still being made, as Glaido and Wispr Flow do, so that
+    when the key goes up only the last phrase is left. One per recording."""
+
+    def __init__(self, path, language, local):
+        self.path, self.language, self.local = path, language, local
+        self.done, self.texts, self.where, self.failed = 0, [], "", False
+        self.released_at = self.queued_at = None
+        self.stop = threading.Event()
+        self.thread = threading.Thread(target=self.watch, daemon=True)
+        self.thread.start()
+
+    def watch(self):
+        while not self.stop.wait(0.25):
+            try:
+                audio = recorded(self.path)
+                cut = pause_at(audio, self.done)
+                if cut:
+                    self.hear(audio[self.done:cut])
+                    self.done = cut
+            except Exception:  # finish() then transcribes the whole recording at once, as before
+                traceback.print_exc()
+                self.failed = True
+                return
+
+    def hear(self, audio):
+        if np.abs(audio).max() < QUIET:  # a long silence; Whisper would invent words for it
+            return
+        result, self.where = transcribe(audio, self.language, self.local)
+        segments = result["segments"]  # Whisper only: how sure it is that nobody spoke
+        if not (segments and all(seg["no_speech_prob"] > 0.6 for seg in segments)):
+            self.texts.append(result["text"].strip())
+
+    def end(self):
+        """Stop watching and return the whole recording. Its file is deleted: the audio is never kept."""
+        self.stop.set()
+        self.thread.join()  # waits for a phrase still being transcribed
+        audio = recorded(self.path)
+        os.unlink(self.path)
+        return audio
+
+    def finish(self, audio):
+        """Transcribe what is left after the last pause; return all the words, and where they were heard."""
+        if self.failed:
+            self.done, self.texts = 0, []
+        if len(audio) - self.done >= RATE * TAP or not self.texts:
+            self.hear(audio[self.done:])
+        return " ".join(t for t in self.texts if t), self.where
+
+
+parakeet = []  # the model, once loaded
+
+
+def listen_locally(audio, language, whisper):
+    """The words in the audio, from Parakeet when it knows the language, otherwise Whisper. Hold mlx_lock."""
+    if language in PARAKEET_LANGUAGES:
+        import mlx.core as mx
+        if not parakeet:
+            from mlx_audio.stt.utils import load
+            parakeet.append(load(PARAKEET))  # the first time downloads 1.2 GB
+        # ponytail: no dictionary hints, as Parakeet takes no prompt; respell() still fixes the spellings afterwards
+        text = parakeet[0].generate(mx.array(audio)).text
+        if not NUMBER_WORDS.search(text):  # otherwise Whisper hears it again, ~0.5s, to write the numbers as digits
+            return {"text": text, "segments": []}, "parakeet"
+    return whisper(audio, path_or_hf_repo=WHISPER, initial_prompt=terms() or None, language=language), "local"
 
 
 def clean(raw):
@@ -842,6 +1052,7 @@ def tidy(raw):
     text = STUTTER.sub(lambda match: match.group(1) or match.group(2), FILLERS.sub("", raw))
     text = re.sub(r"[^\S\n]+([,.?!;:])", r"\1", re.sub(r"[^\S\n]{2,}", " ", text))  # keep existing line breaks
     text = re.sub(r"([.?!])[.,]+", r"\1", re.sub(r",([.?!])", r"\1", text))  # marks left behind by a removed filler
+    text = re.sub(r"\b(1[0-2]|[1-9])\.([0-5]\d)(?=\s*[ap]\.?m\b)", r"\1:\2", text, flags=re.I)  # Whisper's "3.45 pm"
     text = text.lstrip(" ,.").rstrip(" ,")
     return text[:1].upper() + text[1:]
 
@@ -1026,9 +1237,42 @@ def spoken_bullets(text):
             ("\n\n" + tail if tail else ""))
 
 
+def corrected(raw):
+    """Tidied by rule, except where the speaker corrected themselves: that sentence and the one before it go to the
+    model. Only those, as the model takes ~6s to rewrite a minute of speech and ~1s for a sentence."""
+    sentences = re.split(r"(?<=[.!?])(?=\s)", raw)  # each keeps the space before it, which may be a paragraph break
+    cued = [bool(CUES.search(COURTESY.sub("", s))) for s in sentences] + [False]
+    out = ""
+    for send, run in itertools.groupby(range(len(sentences)), lambda i: cued[i] or cued[i + 1]):
+        text = "".join(sentences[i] for i in run)
+        out += text[:len(text) - len(text.lstrip())] + (clean if send else tidy)(text.strip())
+    return out
+
+
+MARKS = {"question mark": "?", "exclamation mark": "!", "exclamation point": "!", "comma": ",", "full stop": "."}
+
+
+def marks(text):
+    """Punctuation and breaks said aloud: "is it working question mark", "new paragraph", "dot com"."""
+    def mark(m):  # the sign replaces the words and any comma or stop around them; a new sentence gets its capital
+        sign, after = MARKS[m[1].lower()], m[2] or ""
+        return sign + (after if sign == "," else after.upper())
+
+    text = re.sub(r"[,.]?\s*\b(question mark|exclamation (?:mark|point)|comma|full stop)\b[,.!?]?(\s+[a-z])?", mark,
+                  text, flags=re.I)
+    # "new line" only on its own, as in "New line items were added" it is content
+    text = re.sub(r"(?:^|(?<=[.!?\n]))[^\S\n]*\bnew (?:(paragraph)|line\b(?=[.,:!]|\s+(?-i:[A-Z0-9])|\s*$))\b[.,:!]?\s*",
+                  lambda m: "\n\n" if m[1] else "\n", text, flags=re.I)
+    text = re.sub(r"\b(\w+) dot (com|org|net|io|ai|co)\b", r"\1.\2", text, flags=re.I)
+    # "$48,375. and 62 cents": before sentences are split, so the stray stop cannot split a correction
+    text = re.sub(r"(\$(?:\d{1,3}(?:,\d{3})+|\d+))[.,]?[^\S\n]+and[^\S\n]+(\d{1,2})[^\S\n]+cents?\b", lambda m: f"{m[1]}.{int(m[2]):02d}",
+                  text, flags=re.I)
+    return re.sub(r"\n[a-z]", lambda m: m[0].upper(), text)
+
+
 def polish(raw):
-    """What to type for a transcript: tidied by rule, or by the model when the speaker corrected themselves."""
-    text = respell(fuzzy(clean(raw) if CUES.search(COURTESY.sub("", raw)) else tidy(raw)))
+    """What to type for a transcript: tidied by rule, or by the model where the speaker corrected themselves."""
+    text = respell(fuzzy(corrected(marks(raw))))
     numbered = spoken_list(text)
     return numbered if numbered != text else spoken_bullets(text)
 
@@ -1259,6 +1503,12 @@ _ax.AXUIElementCopyAttributeValue.argtypes = [ctypes.c_void_p, ctypes.c_void_p, 
 _ax.AXUIElementSetAttributeValue.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
 _ax.AXUIElementCopyAttributeValue.restype = _ax.AXUIElementSetAttributeValue.restype = ctypes.c_int32
 _ax.CFRelease.argtypes = [ctypes.c_void_p]
+_ax.AXUIElementSetMessagingTimeout.argtypes = [ctypes.c_void_p, ctypes.c_float]
+_ax.AXUIElementSetMessagingTimeout.restype = ctypes.c_int32
+_system = _ax.AXUIElementCreateSystemWide()  # kept for the life of the process
+# Set on the system-wide element, the timeout applies to every element. The default is 6s, and a busy app (Chrome
+# building its accessibility tree) held dictations that long before the paste.
+_ax.AXUIElementSetMessagingTimeout(_system, 0.25)
 # browsers often report a focused text box only as the page itself (AXWebArea)
 TEXT_ROLES = {"AXTextField", "AXTextArea", "AXComboBox", "AXWebArea"}
 
@@ -1277,9 +1527,7 @@ def typing_spot():
         key = AppKit.NSString.stringWithString_("AXManualAccessibility").nsstring()
         _ax.AXUIElementSetAttributeValue(app, objc.pyobjc_id(key), ctypes.c_void_p.in_dll(_ax, "kCFBooleanTrue"))
         _ax.CFRelease(app)
-    system = _ax.AXUIElementCreateSystemWide()
-    error, focused = ax_get(system, "AXFocusedUIElement")
-    _ax.CFRelease(system)
+    error, focused = ax_get(_system, "AXFocusedUIElement")
     if error:  # Chrome and Electron apps often answer "no focus" while a text box is focused, so paste anyway
         print(f"focus unknown (AX error {error}), pasting")
         return None
@@ -1310,9 +1558,7 @@ _ax.AXUIElementGetPid.restype, _ax.AXUIElementGetPid.argtypes = ctypes.c_int32, 
 def front_pid():
     """The app with keyboard focus, asked of Accessibility, which is always current; NSWorkspace's answer is updated
     only by a run loop and can lag behind an app switch."""
-    system = _ax.AXUIElementCreateSystemWide()
-    error, app = ax_get(system, "AXFocusedApplication")
-    _ax.CFRelease(system)
+    error, app = ax_get(_system, "AXFocusedApplication")
     if not error:
         pid = ctypes.c_int32()
         error = _ax.AXUIElementGetPid(app, ctypes.byref(pid))
@@ -1325,9 +1571,7 @@ def front_pid():
 
 def focus_now():
     """The focused element (the caller releases it), or None when macOS will not say."""
-    system = _ax.AXUIElementCreateSystemWide()
-    error, focused = ax_get(system, "AXFocusedUIElement")
-    _ax.CFRelease(system)
+    error, focused = ax_get(_system, "AXFocusedUIElement")
     return None if error else focused
 
 
@@ -1464,13 +1708,14 @@ def make_handler(on_settings_change, on_quit, on_note, taking_note, on_restart, 
                 if self.path == "/api/dictionary":
                     DICTIONARY.write_text("".join(t + "\n" for t in valid_terms(body["terms"])))
                 elif self.path == "/api/settings":
-                    was_on = ai_on()
+                    was_on, was_cloud = ai_on(), cloud_text()
                     SETTINGS.write_text(json.dumps(valid_settings(body), indent=2) + "\n")
                     on_settings_change()
-                    if ai_on() and not was_on:
+                    if ai_on() and (not was_on or was_cloud != cloud_text()):  # the local model may be needed now
                         threading.Thread(target=setup_ai, daemon=True).start()
-                    elif was_on and not ai_on():  # give back the 5 GB the text model holds
+                    if was_on and not ai_on():  # give back the 5 GB the text model holds
                         status["ai"] = {"step": "off"}
+                    if (was_on and not ai_on()) or (cloud_text() and not was_cloud):
                         threading.Thread(target=unload, daemon=True).start()
                     if "keep_days" in body:
                         prune_history()
@@ -1871,6 +2116,16 @@ def make_card():
 def main():
     recording, note = [False], [False]  # the settings server reads these immediately at launch
     actions = {}  # filled in as the microphone and the pill come up
+    microphone_work = ThreadPoolExecutor(max_workers=1, thread_name_prefix="microphone")
+
+    def queue_microphone(action, *args):
+        # Keep device waits out of the keyboard event tap, and preserve press/release order.
+        def run():
+            try:
+                action(*args)
+            except Exception:
+                traceback.print_exc()
+        microphone_work.submit(run)
 
     def later(name):  # HTTP callbacks can arrive before the microphone and the pill are ready
         if name not in actions:
@@ -1900,7 +2155,6 @@ def main():
         open_settings()
         return
     threading.Thread(target=server.serve_forever, daemon=True).start()
-    threading.Thread(target=setup_ai, daemon=True).start()
 
     import mlx_whisper  # slow to import
 
@@ -1914,7 +2168,7 @@ def main():
     app = AppKit.NSApplication.sharedApplication()
     # never the active app: no Dock icon, and keyboard focus always stays with the app you are typing in
     app.setActivationPolicy_(AppKit.NSApplicationActivationPolicyProhibited)
-    show = make_pill(lambda: toggle(), open_settings)
+    show = make_pill(lambda: queue_microphone(toggle, time.perf_counter()), open_settings)
     card = make_card()
     actions["refresh"] = show.refresh
     show("busy")
@@ -1922,17 +2176,12 @@ def main():
 
     jobs = queue.Queue()
 
-    def spawn():  # a recorder, already started so the next recording begins without delay, and the file it fills
-        fd, path = tempfile.mkstemp(suffix=".f32")
-        os.close(fd)
-        return subprocess.Popen([sys.executable, "-c", RECORDER, path, str(RATE)], stdin=subprocess.PIPE), path
-
-    recorder = [spawn()]
+    recorder = [spawn_recorder()]
     status["mic"] = microphone_allowed()
 
     def ask_for_microphone():  # macOS asks the first time a recording starts, so start a throwaway one
         def probe():
-            process, path = spawn()
+            process, path = spawn_recorder()
             time.sleep(2)
             try:
                 process.stdin.write(b"\n")
@@ -1940,7 +2189,7 @@ def main():
                 time.sleep(1)
             except OSError:
                 pass
-            process.kill()
+            close_recorder(process)
             Path(path).unlink(missing_ok=True)
         threading.Thread(target=probe, daemon=True).start()
 
@@ -1948,6 +2197,7 @@ def main():
     if status["mic"] is None:  # first launch: ask now, during setup, not in the middle of the first sentence
         ask_for_microphone()
     lock = threading.Lock()
+    phrases = [None]  # the current recording's Phrases
     hands_free = [False]  # True when recording runs until the next click or tap, with no key held
     pressed_at, last_tap = [0.0], [0.0]
     # {"text", "at", "before", "pid", "focus"}: what a voice command would change, and the app and text box it went
@@ -1962,28 +2212,39 @@ def main():
             return
         with lock:
             if not recording[0]:
+                if recorder[0][0].poll() is not None:
+                    close_recorder(recorder[0][0])
+                    Path(recorder[0][1]).unlink(missing_ok=True)
+                    recorder[0] = spawn_recorder()
+                show("Opening microphone")
                 try:
-                    recorder[0][0].stdin.write(settings()["microphone"].encode() + b"\n")
-                    recorder[0][0].stdin.flush()
-                except OSError:
-                    print("the recorder had stopped; started a new one, try again")
-                    recorder[0] = spawn()
+                    open_recorder(recorder[0][0], settings()["microphone"])
+                except (OSError, RuntimeError) as error:
+                    print("microphone could not start:", error)
+                    close_recorder(recorder[0][0])
+                    Path(recorder[0][1]).unlink(missing_ok=True)
+                    recorder[0] = spawn_recorder()
+                    show("Microphone unavailable")
                     return
                 hands_free[0], note[0] = by_click, as_note
                 recording[0] = True
+                language = settings()["language"]
+                phrases[0] = Phrases(recorder[0][1], None if language == "auto" else language, mlx_whisper.transcribe)
                 show("handsfree" if by_click else "listening")
                 print("recording...")
 
-    def stop():
+    def stop(requested=None):
+        requested = time.perf_counter() if requested is None else requested
         with lock:
             if recording[0]:
                 recording[0] = False
-                process, path = recorder[0]
-                process.kill()
-                process.wait()
-                recorder[0] = spawn()
+                phrases[0].released_at = requested
+                process = recorder[0][0]
+                close_recorder(process)
+                recorder[0] = spawn_recorder()
                 show("busy")
-                jobs.put((path, note[0]))
+                phrases[0].queued_at = time.perf_counter()
+                jobs.put((phrases[0], note[0]))
 
     def level():
         """How loud the last 50 ms of the current recording were, from 0 to 1."""
@@ -1998,23 +2259,22 @@ def main():
 
     show.level = level
 
-    def take_note():
-        stop() if recording[0] else start(by_click=True, as_note=True)
+    def take_note(requested=None):
+        stop(requested) if recording[0] else start(by_click=True, as_note=True)
 
-    actions["note"] = take_note
+    actions["note"] = lambda: queue_microphone(take_note, time.perf_counter())
 
-    def toggle():
-        stop() if recording[0] else start(by_click=True)
+    def toggle(requested=None):
+        stop(requested) if recording[0] else start(by_click=True)
 
-    def key_down():
-        pressed_at[0] = time.time()
+    def key_down(at, requested):
+        pressed_at[0] = at
         if hands_free[0] and recording[0]:
-            stop()  # one more tap ends a hands-free recording
+            stop(requested)  # one more tap ends a hands-free recording
         else:
             start(by_click=False)
 
-    def key_up():
-        now = time.time()
+    def key_up(now, requested):
         if hands_free[0]:
             return  # released during or right after a hands-free recording: nothing to do
         if now - pressed_at[0] < TAP and now - last_tap[0] < DOUBLE_TAP and recording[0]:
@@ -2024,7 +2284,7 @@ def main():
         else:
             if now - pressed_at[0] < TAP:
                 last_tap[0] = now
-            stop()  # a tap records too little to transcribe, so it is discarded
+            stop(requested)  # a tap records too little to transcribe, so it is discarded
 
     tap = [None, None]  # the keyboard event tap and its run-loop source
     held = [False]  # a combination shortcut is currently down
@@ -2076,16 +2336,16 @@ def main():
                 return event
             if modifier_only(key):
                 if kind == Quartz.kCGEventFlagsChanged:
-                    key_down() if flags & MOD_KEYS[keycode][0] else key_up()
+                    queue_microphone(key_down if flags & MOD_KEYS[keycode][0] else key_up, time.time(), time.perf_counter())
                 return event
             if kind == Quartz.kCGEventKeyDown and flags & MODS == key["mods"]:
                 if not held[0]:  # ignore auto-repeat while the keys stay down
                     held[0] = True
-                    key_down()
+                    queue_microphone(key_down, time.time(), time.perf_counter())
                 return None  # swallow the keystroke so the app in front never sees it
             if kind == Quartz.kCGEventKeyUp and held[0]:
                 held[0] = False
-                key_up()
+                queue_microphone(key_up, time.time(), time.perf_counter())
                 return None
         except Exception:
             traceback.print_exc()
@@ -2119,33 +2379,32 @@ def main():
             return True  # key-up events for ordinary keys are reliable; only modifier releases go missing
         return Quartz.CGEventSourceFlagsState(Quartz.kCGEventSourceStateCombinedSessionState) & MOD_KEYS[key["keycode"]][0]
 
-    def dictate(path, as_note):
-        audio = np.fromfile(path, np.float32)
-        os.unlink(path)  # the audio is never kept
+    def dictate(pieces, as_note):
+        start = time.perf_counter()
+        released = pieces.released_at if pieces.released_at is not None else start
+        queued = pieces.queued_at if pieces.queued_at is not None else start
+        audio = pieces.end()
         if len(audio) < RATE * TAP:  # accidental tap; Whisper invents text from silence
             print(f"skipped: only {len(audio) / RATE:.1f}s recorded")
             return
         if np.abs(audio).max() < QUIET:  # Whisper writes paragraphs of invented text for near-silence
             print(f"skipped: too quiet to be speech (peak level {np.abs(audio).max():.2f})")
             return
-        print(f"transcribing {len(audio) / RATE:.1f}s (peak level {np.abs(audio).max():.2f})...")
-        start = time.time()
-        language = settings()["language"]
-        language = None if language == "auto" else language
-        result, where = transcribe(audio, language, mlx_whisper.transcribe)
-        raw = result["text"].strip()
-        heard = time.time() - start
+        print(f"transcribing {len(audio) / RATE:.1f}s, {pieces.done / RATE:.1f}s of it already done "
+              f"(peak level {np.abs(audio).max():.2f})...")
+        raw, where = pieces.finish(audio)
+        heard_at = time.perf_counter()
+        heard = heard_at - start
 
         def took():  # total, and how much of it was speech to text; the rest is the text model and the paste
-            return f"[{time.time() - start:.1f}s, {where} speech {heard:.1f}s]"
+            return f"[{time.perf_counter() - released:.1f}s, {where} speech {heard:.1f}s]"
         # Whisper invents words from silence; it also reports how sure it is that nobody spoke
         invented = len(raw.split()) > 6 * len(audio) / RATE + 3  # nobody speaks six words a second
-        silent = result["segments"] and all(seg["no_speech_prob"] > 0.6 for seg in result["segments"])  # Whisper only
-        if not spoken(raw) or invented or silent:
+        if not spoken(raw) or invented:  # phrases Whisper thought silent were already dropped
             print("skipped: no speech heard")
             return
         if as_note:  # ponytail: one voice, no speaker labels; needs a diarisation model to tell people apart
-            print(f"[{time.time() - start:.1f}s] note saved: {len(raw.split())} words")
+            print(f"[{time.perf_counter() - released:.1f}s] note saved: {len(raw.split())} words")
             return remember(respell(raw), raw, len(audio) / RATE, kind="note")
         last = last_paste[0]
         # only a short remark soon after a dictation can be a command, so normal dictations pay nothing for this
@@ -2176,8 +2435,15 @@ def main():
         if not text:
             print("skipped: nothing but filler sounds")
             return
+        cleaned_at = time.perf_counter()
         pasted = deliver(text + " ", card)  # trailing space so back-to-back dictations don't run together
+        delivered_at = time.perf_counter()
         set_last(text if pasted else None)
+        tracked_at = time.perf_counter()
+        print(f"dictation timing: stop={queued - released:.3f}s queue={start - queued:.3f}s "
+              f"speech={heard:.3f}s cleanup={cleaned_at - heard_at:.3f}s "
+              f"delivery={delivered_at - cleaned_at:.3f}s tracking={tracked_at - delivered_at:.3f}s "
+              f"to_delivery={delivered_at - released:.3f}s total={tracked_at - released:.3f}s")
         print(f"{took()} raw:   {logged(raw)}\n        clean: {logged(text)}")
         remember(text, raw, len(audio) / RATE)
 
@@ -2199,6 +2465,8 @@ def main():
     def worker():  # the main thread belongs to AppKit
         print("loading models...")
         load_local_speech(mlx_whisper.transcribe)
+        # only now: both import transformers, which fails at random when two threads import it at once
+        threading.Thread(target=setup_ai, daemon=True).start()
         carbon = ctypes.cdll.LoadLibrary("/System/Library/Frameworks/Carbon.framework/Carbon")
         carbon.IsSecureEventInputEnabled.restype = ctypes.c_bool
 
@@ -2226,7 +2494,7 @@ def main():
                 # macOS sometimes never delivers the key-up event, which left the recording running forever
                 if recording[0] and not hands_free[0] and not key_is_down() and time.time() - pressed_at[0] > 1:
                     print("key release was missed, stopping the recording")
-                    stop()
+                    queue_microphone(stop, time.perf_counter())
                 if time.time() > prune_at:  # the "Keep history" setting, applied at launch and then hourly
                     prune_at = time.time() + 3600
                     try:

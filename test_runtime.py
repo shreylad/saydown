@@ -125,7 +125,7 @@ class RuntimeTests(unittest.TestCase):
         home_data = self.root / 'home/Library/Application Support/Saydown'
         shutil.copytree(self.data, home_data)
         import sys
-        result = subprocess.run([sys.executable, '-c', code], check=True, capture_output=True, text=True)
+        result = subprocess.run([sys.executable, '-B', '-c', code], check=True, capture_output=True, text=True)
         self.assertEqual(result.stdout.strip(), 'new')
 
     def test_wrong_bundle_or_invalid_python_is_rejected_before_changes(self):

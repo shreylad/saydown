@@ -1,10 +1,16 @@
-"""Score a text model on everything Saydown asks of one: uv run --with-requirements <(uv export --script dictate.py) bench.py mlx-community/gemma-4-e4b-it-5bit
+"""Score a text model on everything Saydown asks of one: uv run --with-requirements <(uv export --script dictate.py) bench.py mlx-community/gemma-4-e4b-it-5bit (or openrouter:google/gemma-4-26b-a4b-it, key in API_KEY)
 
 Runs every check without stopping at the first failure and prints pass counts and timings per group.
 """
-import sys, time
+import os, sys, time
 import dictate
 model = dictate.TEXT_MODEL = sys.argv[1]
+provider, _, cloud_model = model.partition(":")
+if provider in dictate.TEXT_APIS:  # openrouter:<model> or deepinfra:<model>, with the key in API_KEY
+    url, _, extra = dictate.TEXT_APIS[provider]
+    dictate.TEXT_APIS[provider] = (url, cloud_model, extra)
+    dictate.settings = lambda saved=dictate.settings(): saved | {"text_provider": provider, "ai_features": True}
+    dictate.cloud_key = lambda provider: os.environ["API_KEY"]
 two = "The launch moves to March. Please tell the vendors today."
 results, times = [], {}
 def check(group, name, fn, ok):
@@ -16,7 +22,7 @@ def check(group, name, fn, ok):
     try: good = bool(ok(out))
     except Exception: pass
     results.append((group, name, good, str(out).replace("\n", " / ")[:110]))
-for repo in (model, dictate.EMBED_MODEL): dictate.paths[repo] = dictate.fetch(repo, lambda *a, **k: None)
+for repo in (dictate.EMBED_MODEL,) if dictate.cloud_text() else (model, dictate.EMBED_MODEL): dictate.paths[repo] = dictate.fetch(repo, lambda *a, **k: None)
 dictate.clean("warm up")
 for raw, want, unwanted in [
     ("um so send the report on tuesday no wait wednesday", "Wednesday", "Tuesday"),

@@ -213,9 +213,10 @@
         <span>Transcription service</span>
         <small>Use your Mac, or pay for transcription with your own API account.</small>
         <span class="control"><select id="speech-provider">
-          <option value="local">Local Whisper · no API fees</option>
+          <option value="local">On this Mac · no API fees</option>
           <option value="openai">OpenAI · paid API</option>
           <option value="openrouter">OpenRouter · paid API</option>
+          <option value="deepinfra">DeepInfra · paid API, cheapest</option>
         </select></span>
       </label>
       <div id="cloud-speech" hidden>
@@ -233,7 +234,7 @@
           </div>
           <small>Stored in macOS Keychain. The saved key is never displayed.</small>
         </form>
-        <p class="speech-note" id="speech-privacy">OpenAI receives your recording and dictionary hints. API usage is billed separately from ChatGPT. If a request fails, Saydown uses local Whisper automatically.</p>
+        <p class="speech-note" id="speech-privacy">OpenAI receives your recording and dictionary hints. API usage is billed separately from ChatGPT. If a request fails, Saydown transcribes on this Mac instead.</p>
         <p class="speech-note" id="speech-model-note">Prefer GPT Transcribe for new setups. The legacy models are scheduled to retire on February 26, 2027.</p>
       </div>
       <p class="speech-note" id="speech-feedback" role="status" aria-live="polite"></p>
@@ -263,6 +264,15 @@
         <span>AI features</span>
         <small>Rewrite, Ask, voice commands, and fixing self-corrections such as “Tuesday, no wait, Wednesday”. They run on this Mac and need a one-time download of about 6 GB. Plain dictation works without them.</small>
         <span class="control"><input type="checkbox" id="ai-features"></span>
+      </label>
+      <label class="field">
+        <span>Run AI features on</span>
+        <small>A paid API uses a larger Gemma model and frees about 5 GB of memory, for about $0.30 a month. The provider receives the text of your dictations, and its key is the one saved under Speech-to-text. If a cleanup request fails, Saydown tidies the text by rule instead.</small>
+        <span class="control"><select id="text-provider">
+          <option value="local">This Mac · no API fees</option>
+          <option value="openrouter">OpenRouter · paid API</option>
+          <option value="deepinfra">DeepInfra · paid API</option>
+        </select></span>
       </label>
       <label class="field">
         <span>Voice commands</span>
@@ -550,17 +560,19 @@ function renderSpeech() {
   const speech = state.speech;
   if (!speech) return;
   const provider = state.settings.speech_provider, router = provider === "openrouter";
-  const label = router ? "OpenRouter" : "OpenAI";
-  const model = state.settings[router ? "openrouter_model" : "speech_model"];
+  const label = {openrouter: "OpenRouter", deepinfra: "DeepInfra"}[provider] || "OpenAI";
+  const model = provider === "deepinfra" ? Object.keys(speech.models)[0] : state.settings[router ? "openrouter_model" : "speech_model"];
   if (document.activeElement !== $("#speech-provider")) $("#speech-provider").value = state.settings.speech_provider;
   if (document.activeElement !== $("#speech-model")) fill($("#speech-model"), Object.entries(speech.models), model);
   $("#cloud-speech").hidden = provider === "local";
   $("#speech-key-label").textContent = label + " API key";
   $("#speech-key").setAttribute("aria-label", label + " API key");
-  $("#speech-privacy").textContent = router
-    ? "OpenRouter and its transcription provider receive your recording and dictionary hints. Usage is billed to your OpenRouter account. If a request fails, Saydown uses local Whisper automatically."
-    : "OpenAI receives your recording and dictionary hints. API usage is billed separately from ChatGPT. If a request fails, Saydown uses local Whisper automatically.";
-  $("#speech-model-note").hidden = router;
+  $("#speech-privacy").textContent = provider === "deepinfra"
+    ? "DeepInfra receives your recording and dictionary hints. Usage is billed to your DeepInfra account, about $0.01 per hour of speech. If a request fails, Saydown transcribes on this Mac instead."
+    : router
+    ? "OpenRouter and its transcription provider receive your recording and dictionary hints. Usage is billed to your OpenRouter account. If a request fails, Saydown transcribes on this Mac instead."
+    : "OpenAI receives your recording and dictionary hints. API usage is billed separately from ChatGPT. If a request fails, Saydown transcribes on this Mac instead.";
+  $("#speech-model-note").hidden = provider !== "openai";
   $("#speech-key-status").textContent = speech.key_saved ? "— saved in Keychain" : "— no key saved";
   $("#speech-key-remove").disabled = speechBusy || !speech.key_saved;
   $("#speech-last").textContent = speech.last.message ? "Last dictation: " + speech.last.message : (state.settings.speech_provider === "local"
@@ -587,6 +599,7 @@ function renderSettings() {
   $("#keep-days").value = state.settings.keep_days;
   $("#log-text").checked = state.settings.log_text;
   $("#ai-features").checked = state.settings.ai_features;
+  $("#text-provider").value = state.settings.text_provider;
   $("#voice-commands").checked = state.settings.voice_commands;
   $("#voice-commands").disabled = !state.settings.ai_features;
 }
@@ -716,6 +729,7 @@ $("#pill-position").onchange = (event) => post("/api/settings", {pill_position: 
 $("#save-history").onchange = (event) => post("/api/settings", {save_history: event.target.checked});
 $("#voice-commands").onchange = (event) => post("/api/settings", {voice_commands: event.target.checked});
 $("#ai-features").onchange = (event) => post("/api/settings", {ai_features: event.target.checked});
+$("#text-provider").onchange = (event) => post("/api/settings", {text_provider: event.target.value});
 $("#log-text").onchange = (event) => post("/api/settings", {log_text: event.target.checked});
 $("#keep-days").onchange = (event) => post("/api/settings", {keep_days: Number(event.target.value)});
 $("#export").onclick = async () => {
