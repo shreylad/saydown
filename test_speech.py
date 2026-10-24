@@ -78,7 +78,7 @@ class SpeechTests(unittest.TestCase):
         clean.assert_called_once_with("Is this working? The forecast for Q4 looks strong, wait, no, I mean Q1.")
 
     def test_punctuation_and_breaks_said_aloud_are_written(self):
-        raw = ("It works. New paragraph is this working question mark, yes, comma, it is exclamation mark. "
+        raw = ("It works. New paragraph is this working? Question mark? Yes, comma, it is exclamation mark. "
                "New line. email sri at srila dot com")
         self.assertEqual(self.a.polish(raw), "It works.\n\nIs this working? Yes, it is!\nEmail sri at srila.com")
         for text in ["We need a new line of credit.", "New line items were added.", "Start a new paragraph here.",
@@ -96,6 +96,7 @@ class SpeechTests(unittest.TestCase):
             "Refund -$12 and 50 cents.": "Refund -$12.50.",
             "Pay $1 and 2 cents, then $3 and 4 cents.": "Pay $1.02, then $3.04.",
             "It cost $5 comma and 2 cents.": "It cost $5.02.",
+            "Revenue was 48,375.62 cents.": "Revenue was $48,375.62.",  # Whisper dropped "dollars"
         }
         with patch.object(self.a, "llm") as llm:
             for raw, expected in cases.items():

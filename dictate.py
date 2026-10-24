@@ -729,7 +729,9 @@ def llm(system, user, max_tokens=2048, temperature=1.0):
     # ponytail: one lock, so a dictation waits behind a long rewrite; give the models a queue if that bites
     with mlx_lock:
         if not text_model:
+            started = time.monotonic()
             text_model.update(pair=mlx_lm.load(paths[TEXT_MODEL]))
+            print(f"text model loaded in {time.monotonic() - started:.1f}s")
         if unload_timer[0]:
             unload_timer[0].cancel()
         unload_timer[0] = threading.Timer(IDLE, unload)
@@ -1034,7 +1036,9 @@ def clean(raw):
         system += (f"\n\nThe speaker's dictionary: {terms()}\nIf a word or phrase in the transcript sounds like a "
                    "dictionary entry, it was misheard: replace it with the dictionary spelling. Change nothing else.")
     try:
+        started = time.monotonic()
         out = llm(system, f"<transcript>{raw}</transcript>", temperature=0)
+        print(f"cleanup by model: {time.monotonic() - started:.1f}s for {len(raw.split())} words")
     except Exception as e:  # never lose what was said: fall back to the cleanup by rule
         print("cleanup by model unavailable, tidying by rule:", e)
         return tidy(raw)
@@ -1258,7 +1262,7 @@ def marks(text):
         sign, after = MARKS[m[1].lower()], m[2] or ""
         return sign + (after if sign == "," else after.upper())
 
-    text = re.sub(r"[,.]?\s*\b(question mark|exclamation (?:mark|point)|comma|full stop)\b[,.!?]?(\s+[a-z])?", mark,
+    text = re.sub(r"[,.?!]?\s*\b(question mark|exclamation (?:mark|point)|comma|full stop)\b[,.!?]?(\s+[a-z])?", mark,
                   text, flags=re.I)
     # "new line" only on its own, as in "New line items were added" it is content
     text = re.sub(r"(?:^|(?<=[.!?\n]))[^\S\n]*\bnew (?:(paragraph)|line\b(?=[.,:!]|\s+(?-i:[A-Z0-9])|\s*$))\b[.,:!]?\s*",
@@ -1267,6 +1271,8 @@ def marks(text):
     # "$48,375. and 62 cents": before sentences are split, so the stray stop cannot split a correction
     text = re.sub(r"(\$(?:\d{1,3}(?:,\d{3})+|\d+))[.,]?[^\S\n]+and[^\S\n]+(\d{1,2})[^\S\n]+cents?\b", lambda m: f"{m[1]}.{int(m[2]):02d}",
                   text, flags=re.I)
+    # Whisper's "48,375.62 cents" for "...dollars and 62 cents"; the thousands comma rules out a real amount of cents
+    text = re.sub(r"(?<![\d$])(\d{1,3}(?:,\d{3})+\.\d\d) cents\b", r"$\1", text)
     return re.sub(r"\n[a-z]", lambda m: m[0].upper(), text)
 
 
