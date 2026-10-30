@@ -75,6 +75,9 @@ PARAKEET_LANGUAGES = {"en", "es", "fr", "de", "pt", "it", "nl"}
 # Parakeet spells these out ("nine forty five AM") where Whisper writes "9:45 AM"; "one" is left out, being too common
 NUMBER_WORDS = re.compile(r"\b(?:two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|(?:thir|four|fif|six|seven|eigh|nine)teen"
                           r"|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|million|billion|percent|zero)\b", re.I)
+# Parakeet picks the language itself and can't be told: short English clips sometimes come back in Russian.
+# Every language in PARAKEET_LANGUAGES uses Latin letters, so these (Greek to Tibetan, Cyrillic included) mean it guessed wrong.
+WRONG_SCRIPT = re.compile(r"[Ͱ-᷿]")
 SPEECH_MODELS = {
     "gpt-transcribe": "GPT Transcribe (recommended)",
     "gpt-4o-mini-transcribe": "GPT-4o Mini Transcribe (legacy)",
@@ -1025,7 +1028,8 @@ def listen_locally(audio, language, whisper):
             parakeet.append(load(PARAKEET))  # the first time downloads 1.2 GB
         # ponytail: no dictionary hints, as Parakeet takes no prompt; respell() still fixes the spellings afterwards
         text = parakeet[0].generate(mx.array(audio)).text
-        if not NUMBER_WORDS.search(text):  # otherwise Whisper hears it again, ~0.5s, to write the numbers as digits
+        # otherwise Whisper hears it again, ~0.5s, to write the numbers as digits or put the right language back
+        if not NUMBER_WORDS.search(text) and not WRONG_SCRIPT.search(text):
             return {"text": text, "segments": []}, "parakeet"
     return whisper(audio, path_or_hf_repo=WHISPER, initial_prompt=terms() or None, language=language), "local"
 

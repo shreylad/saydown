@@ -1180,6 +1180,22 @@ class SpeechTests(unittest.TestCase):
         llm.assert_not_called()
         self.assertIn("no saved dictations from", empty["answer"])
 
+    def test_parakeet_in_the_wrong_alphabet_goes_to_whisper(self):
+        whisper = Mock(return_value={"text": "Using brainstorming skill.", "segments": []})
+        for heard, expected in (("Юзинг брейнсторминг скил.", "local"), ("Using брейнстоминг скил.", "local"),
+                                ("Café déjà vu, Việt.", "parakeet")):
+            whisper.reset_mock()
+            model = Mock()
+            model.generate.return_value.text = heard
+            with patch.object(self.a, "PARAKEET_LANGUAGES", {"en"}), patch.object(self.a, "parakeet", [model]), \
+                    patch.dict(sys.modules, {"mlx": Mock(), "mlx.core": Mock()}):
+                result, where = self.a.listen_locally([0.0], "en", whisper)
+            self.assertEqual(where, expected, heard)
+            self.assertEqual(whisper.called, expected == "local", heard)
+            self.assertEqual(result["text"], "Using brainstorming skill." if expected == "local" else heard)
+            if expected == "local":
+                self.assertEqual(whisper.call_args.kwargs["language"], "en")
+
 
 if __name__ == "__main__":
     unittest.main()
