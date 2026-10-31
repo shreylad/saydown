@@ -80,6 +80,8 @@
   .style-form { display: grid; gap: 10px; padding: 16px; margin-bottom: 18px; }
   .style-form label { display: grid; gap: 4px; font-size: 13px; font-weight: 600; }
   .style-form input { font-weight: 400; font-size: 15px; }
+  #style-error { margin: 0; color: var(--danger); }
+  #style-error:empty { display: none; }
   .style { display: grid; grid-template-columns: 1fr auto; gap: 16px; padding: 13px 16px; align-items: start; }
   .style + .style { border-top: 1px solid var(--line); }
   .style small { display: block; color: var(--muted); }
@@ -157,7 +159,7 @@
     <h1>Ask your dictations</h1>
     <p class="lead">Answers come from your saved dictations and never leave this Mac.</p>
     <form class="add" id="ask-form">
-      <input type="text" id="question" maxlength="500" placeholder="What did I say about pricing last week?" aria-label="Question" autocomplete="off">
+      <input type="text" id="question" maxlength="500" placeholder="What did I say about pricing last week?" aria-label="Question" autocomplete="off" required pattern=".*\S.*" title="Enter a question.">
       <button class="btn primary" type="submit">Ask</button>
     </form>
     <div id="answer"></div>
@@ -167,7 +169,7 @@
     <h1>Dictionary</h1>
     <p class="lead">Names and jargon you add here are spelled your way. To always replace one thing with another, write it as <kbd>x ai -&gt; xAI</kbd>.</p>
     <form class="add" id="add-term">
-      <input type="text" id="new-term" maxlength="80" placeholder="Add a name or term, or: x ai -> xAI" aria-label="New dictionary term" autocomplete="off">
+      <input type="text" id="new-term" maxlength="80" placeholder="Add a name or term, or: x ai -> xAI" aria-label="New dictionary term" autocomplete="off" required pattern=".*\S.*" title="Enter a dictionary term.">
       <button class="btn primary" type="submit">Add</button>
     </form>
     <div class="card" id="terms"></div>
@@ -177,12 +179,13 @@
     <h1>Rewrite styles</h1>
     <p class="lead">Open Rewrite on any dictation to get it in one of these styles. Add your own here.</p>
     <form class="card style-form" id="style-form">
-      <label>Name <input type="text" id="style-name" maxlength="30" placeholder="For example: Shorter" autocomplete="off"></label>
-      <label>Instruction <input type="text" id="style-instruction" maxlength="300" placeholder="For example: Cut it to half the length without losing any facts." autocomplete="off"></label>
+      <label>Name <input type="text" id="style-name" maxlength="30" placeholder="For example: Shorter" autocomplete="off" required pattern=".*\S.*" title="Enter a style name."></label>
+      <label>Instruction <input type="text" id="style-instruction" maxlength="300" placeholder="For example: Cut it to half the length without losing any facts." autocomplete="off" required pattern=".*\S.*" title="Enter a style instruction."></label>
       <div class="actions">
         <button class="btn primary" type="submit" id="style-save">Add style</button>
         <button class="btn" type="button" id="style-cancel" hidden>Cancel</button>
       </div>
+      <p class="error" id="style-error" role="alert"></p>
     </form>
     <div class="card" id="style-list"></div>
   </section>
@@ -364,11 +367,17 @@ function copyButton(text) {
 }
 
 function confirmClick(button, label, armedLabel, action) {  // two clicks; native confirm() dialogs do not show in this window
+  const ariaLabel = button.getAttribute("aria-label");
   button.onclick = () => {
     if (button.dataset.armed) return action();
     button.dataset.armed = "1";
     button.textContent = armedLabel;
-    setTimeout(() => { delete button.dataset.armed; button.textContent = label; }, 3000);
+    if (ariaLabel) button.setAttribute("aria-label", armedLabel + ". " + ariaLabel);
+    setTimeout(() => {
+      delete button.dataset.armed;
+      button.textContent = label;
+      if (ariaLabel) button.setAttribute("aria-label", ariaLabel);
+    }, 3000);
   };
 }
 
@@ -515,6 +524,7 @@ function resetStyleForm() {
   $("#style-form").reset();
   $("#style-save").textContent = "Add style";
   $("#style-cancel").hidden = true;
+  $("#style-error").textContent = "";
 }
 
 function dropCached(styleId) {  // an edited or deleted style's old results no longer apply
@@ -533,12 +543,14 @@ function renderStyles() {
       const edit = el("button", "btn", "Edit"), remove = el("button", "btn danger", "Delete");
       edit.onclick = () => {
         editing = style.id;
+        $("#style-error").textContent = "";
         $("#style-name").value = style.name;
         $("#style-instruction").value = style.instruction;
         $("#style-save").textContent = "Save changes";
         $("#style-cancel").hidden = false;
         $("#style-name").focus();
       };
+      remove.setAttribute("aria-label", "Delete " + style.name);
       confirmClick(remove, "Delete", "Click again to delete", () => {
         dropCached(style.id);
         if (editing === style.id) resetStyleForm();
@@ -669,9 +681,22 @@ $("#style-form").onsubmit = async (event) => {
   event.preventDefault();
   const body = {name: $("#style-name").value.trim(), instruction: $("#style-instruction").value.trim()};
   if (!body.name || !body.instruction) return;
-  if (editing) { dropCached(editing); await post("/api/styles/update", {id: editing, ...body}); }
-  else await post("/api/styles", body);
+  $("#style-error").textContent = "";
+  let response, data;
+  try {
+    response = await send(editing ? "/api/styles/update" : "/api/styles", editing ? {id: editing, ...body} : body);
+    data = await response.json();
+  } catch {
+    $("#style-error").textContent = "Could not reach the app.";
+    return;
+  }
+  if (!response.ok) {
+    $("#style-error").textContent = data.error || "Could not save the style.";
+    return;
+  }
+  if (editing) dropCached(editing);
   resetStyleForm();
+  load().catch(() => {});  // it saved; if the app has gone, the regular poll shows that
 };
 $("#style-cancel").onclick = resetStyleForm;
 $("#quit").onclick = async () => { quitting = true; await send("/api/quit"); $("#gone").hidden = false; };

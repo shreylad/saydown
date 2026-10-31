@@ -40,9 +40,6 @@ class SpeechTests(unittest.TestCase):
             cached[:] = [0.0, False]
         self.audio = self.a.np.ones(1600, dtype=self.a.np.float32) * 0.1
         self.local = Mock(return_value={"text": "local words", "segments": []})
-        no_parakeet = patch.object(self.a, "PARAKEET_LANGUAGES", set())  # these tests drive the Whisper path
-        no_parakeet.start()
-        self.addCleanup(no_parakeet.stop)
 
     def speech(self, *parts):
         """Synthetic audio: (seconds, loud) parts, loud ones as noise at speaking level, the rest near silence."""
@@ -51,24 +48,22 @@ class SpeechTests(unittest.TestCase):
         return np.concatenate([rng.normal(0, 0.2 if loud else 0.002, int(s * self.a.RATE)).astype(np.float32)
                                for s, loud in parts])
 
-    def test_parakeet_for_its_languages_whisper_for_the_rest(self):
-        model = Mock()
-        model.generate.return_value.text = "fast words"
-        with patch.object(self.a, "PARAKEET_LANGUAGES", {"en"}), patch.object(self.a, "parakeet", [model]):
-            self.assertEqual(self.a.transcribe(self.audio, "en", self.local), ({"text": "fast words", "segments": []}, "parakeet"))
-            self.assertEqual(self.a.transcribe(self.audio, "hi", self.local)[1], "local")
-            self.assertEqual(self.a.transcribe(self.audio, None, self.local)[1], "local")
-        self.assertEqual(model.generate.call_count, 1)
-        self.assertEqual(self.local.call_count, 2)
+    def test_local_transcription_uses_whisper_turbo_for_every_language(self):
+        for language in ("en", "es", "fr", "de", "pt", "it", "nl", "hi", None):
+            with self.subTest(language=language), patch.object(self.a, "terms", return_value="Saydown, LangGraph"):
+                self.local.reset_mock()
+                self.assertEqual(self.a.transcribe(self.audio, language, self.local),
+                                 ({"text": "local words", "segments": []}, "local"))
+                self.local.assert_called_once_with(self.audio, path_or_hf_repo="mlx-community/whisper-large-v3-turbo",
+                                                   initial_prompt="Saydown, LangGraph", language=language)
+                self.assertEqual(self.a.speech_status["message"], "Using Whisper Turbo on this Mac.")
 
-    def test_parakeet_phrases_with_spoken_numbers_are_heard_again_by_whisper(self):
-        model = Mock()
-        model.generate.return_value.text = "call me at nine forty five AM"
-        with patch.object(self.a, "PARAKEET_LANGUAGES", {"en"}), patch.object(self.a, "parakeet", [model]):
-            self.assertEqual(self.a.transcribe(self.audio, "en", self.local)[1], "local")
-            model.generate.return_value.text = "no one is here"
-            self.assertEqual(self.a.transcribe(self.audio, "en", self.local)[1], "parakeet")
-        self.assertEqual(self.local.call_count, 1)
+    def test_local_transcription_without_dictionary_has_no_prompt(self):
+        with patch.object(self.a, "terms", return_value=""):
+            self.assertEqual(self.a.listen_locally(self.audio, "en", self.local),
+                             ({"text": "local words", "segments": []}, "local"))
+        self.local.assert_called_once_with(self.audio, path_or_hf_repo="mlx-community/whisper-large-v3-turbo",
+                                           initial_prompt=None, language="en")
 
     def test_only_the_corrected_sentence_and_the_one_before_go_to_the_model(self):
         raw = ("Good morning. Revenue was up 12.5%. Is this working? The forecast for Q4 looks strong, wait, no, "
@@ -211,7 +206,7 @@ class SpeechTests(unittest.TestCase):
                 dictate = inspect.getclosurevars(worker).nonlocals["dictate"]
                 pieces.released_at, pieces.queued_at, pieces.done = 10.0, 10.2, 0
                 pieces.end.return_value = app.np.ones(app.RATE, dtype=app.np.float32)
-                pieces.finish.return_value = ("Ready to send.", "parakeet")
+                pieces.finish.return_value = ("Ready to send.", "local")
                 output = io.StringIO()
                 with patch.object(app.time, "perf_counter", side_effect=[11.0, 11.1, 11.5, 11.6, 11.7, 11.8]), \
                      patch.object(app, "polish", return_value="Ready to send."), \
@@ -331,6 +326,91 @@ class SpeechTests(unittest.TestCase):
         save.assert_called_once_with("fake-test-key-123456789", "openai")
         self.assertEqual(self.a.settings()["speech_provider"], "local")
         self.assertNotIn("fake-test", str(handler.reply.call_args))
+
+    def test_style_add_rejects_builtin_and_custom_names_without_changing_saved_styles(self):
+        saved = [{"id": "custom-one", "name": "My style", "instruction": "Keep facts."}]
+        with tempfile.TemporaryDirectory() as folder, patch.object(self.a, "STYLES", Path(folder) / "styles.json"):
+            self.a.save_styles(saved)
+            for name, extra in [(" grammar ", {}), ("MY STYLE", {}), ("Grammar", {"id": "grammar"})]:
+                with self.subTest(name=name, extra=extra):
+                    handler = self.handler("/api/styles", {"name": name, "instruction": "New instruction.", **extra})
+                    handler.do_POST()
+                    self.assertEqual(handler.reply.call_args.kwargs.get("status", 200), 400)
+                    self.assertEqual(handler.reply.call_args.args[0], {"error": "A style with this name already exists. Choose a different name."})
+                    self.assertEqual(self.a.custom_styles(), saved)
+
+    def test_style_update_rejects_another_name_but_preserves_unchanged_legacy_names(self):
+        saved = [{"id": "custom-one", "name": "My style", "instruction": "Keep facts."},
+                 {"id": "custom-legacy", "name": "Grammar", "instruction": "Legacy instruction."}]
+        with tempfile.TemporaryDirectory() as folder, patch.object(self.a, "STYLES", Path(folder) / "styles.json"):
+            self.a.save_styles(saved)
+            for name in ("GRAMMAR", "shorter"):
+                handler = self.handler("/api/styles/update", {"id": "custom-one", "name": name, "instruction": "Changed."})
+                handler.do_POST()
+                self.assertEqual(handler.reply.call_args.kwargs.get("status", 200), 400)
+                self.assertEqual(self.a.custom_styles(), saved)
+            for style in saved:
+                handler = self.handler("/api/styles/update", {"id": style["id"], "name": style["name"], "instruction": "Changed."})
+                handler.do_POST()
+                self.assertEqual(handler.reply.call_args.args[0], {"ok": True})
+            self.assertEqual(self.a.custom_styles(), [s | {"instruction": "Changed."} for s in saved])
+
+    def test_style_add_and_rename_still_save_unique_names(self):
+        with tempfile.TemporaryDirectory() as folder, patch.object(self.a, "STYLES", Path(folder) / "styles.json"):
+            handler = self.handler("/api/styles", {"name": " A unique style ", "instruction": " Keep facts. "})
+            handler.do_POST()
+            self.assertEqual(handler.reply.call_args.args[0], {"ok": True})
+            style = self.a.custom_styles()[0]
+            self.assertEqual({k: style[k] for k in ("name", "instruction")}, {"name": "A unique style", "instruction": "Keep facts."})
+            handler = self.handler("/api/styles/update", {"id": style["id"], "name": "Renamed", "instruction": "Changed."})
+            handler.do_POST()
+            self.assertEqual(handler.reply.call_args.args[0], {"ok": True})
+            self.assertEqual(self.a.custom_styles(), [{"id": style["id"], "name": "Renamed", "instruction": "Changed."}])
+
+    def test_style_names_that_look_identical_count_as_duplicates(self):
+        taken = "A style with this name already exists. Choose a different name."
+        for first, second in (("Café", "Café"), ("Café", "CAFÉ"), ("My style", "My  style"),
+                              ("My  style", "my style"), ("Tab name", "Tab name")):
+            with self.subTest(first=first, second=second), tempfile.TemporaryDirectory() as folder, \
+                    patch.object(self.a, "STYLES", Path(folder) / "styles.json"):
+                handler = self.handler("/api/styles", {"name": first, "instruction": "Keep facts."})
+                handler.do_POST()
+                self.assertEqual(handler.reply.call_args.args[0], {"ok": True})
+                saved = self.a.custom_styles()
+                handler = self.handler("/api/styles", {"name": second, "instruction": "Keep facts."})
+                handler.do_POST()
+                self.assertEqual(handler.reply.call_args.args[0], {"error": taken})
+                self.assertEqual(self.a.custom_styles(), saved)
+
+    def test_style_names_are_saved_composed_and_single_spaced_but_instructions_are_untouched(self):
+        with tempfile.TemporaryDirectory() as folder, patch.object(self.a, "STYLES", Path(folder) / "styles.json"):
+            handler = self.handler("/api/styles", {"name": "Café  time", "instruction": "Keep  two  spaces."})
+            handler.do_POST()
+            style = self.a.custom_styles()[0]
+            self.assertEqual((style["name"], style["instruction"]), ("Café time", "Keep  two  spaces."))
+
+    def test_a_saved_name_with_old_spacing_can_still_be_edited(self):
+        saved = [{"id": "custom-old", "name": "My  style", "instruction": "Keep facts."}]
+        with tempfile.TemporaryDirectory() as folder, patch.object(self.a, "STYLES", Path(folder) / "styles.json"):
+            self.a.save_styles(saved)
+            handler = self.handler("/api/styles/update", {"id": "custom-old", "name": "My  style", "instruction": "Changed."})
+            handler.do_POST()
+            self.assertEqual(handler.reply.call_args.args[0], {"ok": True})
+            self.assertEqual(self.a.custom_styles()[0]["instruction"], "Changed.")
+
+    def test_the_fifty_style_limit_says_what_to_do(self):
+        saved = [{"id": f"custom-{i}", "name": f"Style {i}", "instruction": "Keep facts."} for i in range(50)]
+        with tempfile.TemporaryDirectory() as folder, patch.object(self.a, "STYLES", Path(folder) / "styles.json"):
+            self.a.save_styles(saved)
+            handler = self.handler("/api/styles", {"name": "One more", "instruction": "Keep facts."})
+            handler.do_POST()
+            self.assertEqual(handler.reply.call_args.kwargs.get("status", 200), 400)
+            self.assertEqual(handler.reply.call_args.args[0],
+                             {"error": "You can have up to 50 styles of your own. Delete one to add another."})
+            self.assertEqual(self.a.custom_styles(), saved)
+            handler = self.handler("/api/styles/update", {"id": "custom-0", "name": "Style 0", "instruction": "Changed."})
+            handler.do_POST()
+            self.assertEqual(handler.reply.call_args.args[0], {"ok": True})
 
     def test_blank_key_cannot_accidentally_remove_saved_key(self):
         for key in ["", "   ", None]:
@@ -1180,21 +1260,19 @@ class SpeechTests(unittest.TestCase):
         llm.assert_not_called()
         self.assertIn("no saved dictations from", empty["answer"])
 
-    def test_parakeet_in_the_wrong_alphabet_goes_to_whisper(self):
-        whisper = Mock(return_value={"text": "Using brainstorming skill.", "segments": []})
-        for heard, expected in (("Юзинг брейнсторминг скил.", "local"), ("Using брейнстоминг скил.", "local"),
-                                ("Café déjà vu, Việt.", "parakeet")):
-            whisper.reset_mock()
-            model = Mock()
-            model.generate.return_value.text = heard
-            with patch.object(self.a, "PARAKEET_LANGUAGES", {"en"}), patch.object(self.a, "parakeet", [model]), \
-                    patch.dict(sys.modules, {"mlx": Mock(), "mlx.core": Mock()}):
-                result, where = self.a.listen_locally([0.0], "en", whisper)
-            self.assertEqual(where, expected, heard)
-            self.assertEqual(whisper.called, expected == "local", heard)
-            self.assertEqual(result["text"], "Using brainstorming skill." if expected == "local" else heard)
-            if expected == "local":
-                self.assertEqual(whisper.call_args.kwargs["language"], "en")
+    def test_local_warmup_transcribes_once_with_the_selected_language(self):
+        for selected, expected in (("hi", "hi"), ("auto", None)):
+            with self.subTest(language=selected), patch.object(self.a, "terms", return_value=""):
+                self.config(language=selected)
+                self.local.reset_mock()
+                self.a.status["loading"] = True
+                self.a.load_local_speech(self.local)
+                self.assertEqual(self.local.call_count, 1)
+                self.assertEqual(self.local.call_args.kwargs,
+                                 {"path_or_hf_repo": "mlx-community/whisper-large-v3-turbo",
+                                  "initial_prompt": None, "language": expected})
+                self.assertFalse(self.a.status["loading"])
+                self.assertEqual(self.a.status["speech_error"], "")
 
 
 if __name__ == "__main__":

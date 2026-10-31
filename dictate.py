@@ -10,7 +10,7 @@
 Run:  uv run dictate.py          (the first run downloads the models)
 Test: uv run dictate.py --test   (checks the settings and the text rules; bench.py checks the model)
 """
-import ctypes, datetime, difflib, io, itertools, json, math, os, queue, random, re, select, ssl, subprocess, sys, tempfile, threading, time, traceback, urllib.request, uuid, wave, webbrowser
+import ctypes, datetime, difflib, io, itertools, json, math, os, queue, random, re, select, ssl, subprocess, sys, tempfile, threading, time, traceback, unicodedata, urllib.request, uuid, wave, webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -68,16 +68,6 @@ FILLERS = re.compile(r"(?<![-\w'’\"“])(?-i:(?![A-Z]{2,}\b))(?:u+h*m+|u+h+|e+
 # "the the the", "I I"; letters only, so the digits of a spoken number ("5 5 5") are kept
 STUTTER = re.compile(r"\b([^\W\d_]+)(?:,?\s+\1\b){2,}|\b(I)(?:,?\s+I\b)+", re.I)
 WHISPER = "mlx-community/whisper-large-v3-turbo"
-# 2-4x faster than Whisper on a Mac (0.05 s for 5 s of speech) and writes nothing for silence, but knows only European
-# languages; Whisper still does "auto" and the rest. Runs through mlx_audio, already in the bundle.
-PARAKEET = "mlx-community/parakeet-tdt-0.6b-v3"
-PARAKEET_LANGUAGES = {"en", "es", "fr", "de", "pt", "it", "nl"}
-# Parakeet spells these out ("nine forty five AM") where Whisper writes "9:45 AM"; "one" is left out, being too common
-NUMBER_WORDS = re.compile(r"\b(?:two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|(?:thir|four|fif|six|seven|eigh|nine)teen"
-                          r"|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand|million|billion|percent|zero)\b", re.I)
-# Parakeet picks the language itself and can't be told: short English clips sometimes come back in Russian.
-# Every language in PARAKEET_LANGUAGES uses Latin letters, so these (Greek to Tibetan, Cyrillic included) mean it guessed wrong.
-WRONG_SCRIPT = re.compile(r"[Ͱ-᷿]")
 SPEECH_MODELS = {
     "gpt-transcribe": "GPT Transcribe (recommended)",
     "gpt-4o-mini-transcribe": "GPT-4o Mini Transcribe (legacy)",
@@ -574,8 +564,17 @@ def all_styles():
     return builtin + [style | {"builtin": False} for style in custom_styles()]
 
 
+def tidy_style_name(name):
+    """One way to write a name: composed accents ("é" has two encodings) and single spaces."""
+    return " ".join(unicodedata.normalize("NFC", name).split())
+
+
+def same_style_name(a, b):
+    return unicodedata.normalize("NFC", tidy_style_name(a).casefold()) == unicodedata.normalize("NFC", tidy_style_name(b).casefold())
+
+
 def valid_style(body):
-    name, instruction = plain(body["name"], 30), plain(body["instruction"], 300)
+    name, instruction = tidy_style_name(plain(body["name"], 30)), plain(body["instruction"], 300)
     if not name or not instruction:
         raise ValueError("empty style")
     return {"name": name, "instruction": instruction}
@@ -629,7 +628,6 @@ def load_local_speech(local):
             # noise, not silence: silence decodes no words, which left the first dictation ~1.5s slower
             noise = np.random.default_rng(0).normal(0, 0.1, RATE).astype(np.float32)
             listen_locally(noise, None if language == "auto" else language, local)
-            local(noise, path_or_hf_repo=WHISPER)  # also redoes Parakeet's phrases with numbers
         status["speech_error"] = ""
     except Exception:
         traceback.print_exc()
@@ -909,7 +907,7 @@ def hear(audio, key, language=None, prompt=None, model="gpt-transcribe", provide
 def transcribe(audio, language, local):
     """Use the selected service and always preserve the local fallback."""
     selected = settings()
-    speech_status.update(engine="local", message=f"Using {'Parakeet' if language in PARAKEET_LANGUAGES else 'Whisper'} on this Mac.")
+    speech_status.update(engine="local", message="Using Whisper Turbo on this Mac.")
     provider = selected["speech_provider"]
     if provider in SPEECH_CATALOG:
         model = {"openai": selected["speech_model"], "openrouter": selected["openrouter_model"]}.get(
@@ -1016,21 +1014,8 @@ class Phrases:
         return " ".join(t for t in self.texts if t), self.where
 
 
-parakeet = []  # the model, once loaded
-
-
 def listen_locally(audio, language, whisper):
-    """The words in the audio, from Parakeet when it knows the language, otherwise Whisper. Hold mlx_lock."""
-    if language in PARAKEET_LANGUAGES:
-        import mlx.core as mx
-        if not parakeet:
-            from mlx_audio.stt.utils import load
-            parakeet.append(load(PARAKEET))  # the first time downloads 1.2 GB
-        # ponytail: no dictionary hints, as Parakeet takes no prompt; respell() still fixes the spellings afterwards
-        text = parakeet[0].generate(mx.array(audio)).text
-        # otherwise Whisper hears it again, ~0.5s, to write the numbers as digits or put the right language back
-        if not NUMBER_WORDS.search(text) and not WRONG_SCRIPT.search(text):
-            return {"text": text, "segments": []}, "parakeet"
+    """Transcribe with Whisper Turbo. Hold mlx_lock."""
     return whisper(audio, path_or_hf_repo=WHISPER, initial_prompt=terms() or None, language=language), "local"
 
 
@@ -1787,14 +1772,19 @@ def make_handler(on_settings_change, on_quit, on_note, taking_note, on_restart, 
                         print(self.path, "failed:", e)
                         return self.reply({"error": "The AI model is not ready yet. Its download shows in this window."
                                            if ai_on() else "AI features are off. Turn them on in Settings."}, status=502)
-                elif self.path == "/api/styles":  # add a custom style
+                elif self.path in ("/api/styles", "/api/styles/update"):
                     styles = custom_styles()
-                    if len(styles) >= 50:
-                        raise ValueError("too many styles")
-                    save_styles(styles + [{"id": "custom-" + uuid.uuid4().hex[:8]} | valid_style(body)])
-                elif self.path == "/api/styles/update":  # built-in styles are not in this list, so cannot be edited
-                    styles = custom_styles()
-                    next(s for s in styles if s["id"] == body["id"]).update(valid_style(body))
+                    style = valid_style(body)
+                    existing = next(s for s in styles if s["id"] == body["id"]) if self.path.endswith("/update") else None
+                    if (existing is None or not same_style_name(style["name"], existing["name"])) and any(
+                            same_style_name(s["name"], style["name"]) for s in all_styles()):
+                        return self.reply({"error": "A style with this name already exists. Choose a different name."}, status=400)
+                    if existing is not None:
+                        existing.update(style)
+                    else:
+                        if len(styles) >= 50:
+                            return self.reply({"error": "You can have up to 50 styles of your own. Delete one to add another."}, status=400)
+                        styles.append({"id": "custom-" + uuid.uuid4().hex[:8]} | style)
                     save_styles(styles)
                 elif self.path == "/api/styles/delete":
                     save_styles([s for s in custom_styles() if s["id"] != body["id"]])
