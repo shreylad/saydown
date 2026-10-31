@@ -52,7 +52,12 @@ DOUBLE_TAP = 0.6  # two taps within this many seconds start hands-free recording
 QUIET = 0.1  # a recording whose loudest moment is below this is silence; lower it for a very quiet microphone
 # Signs that the speaker corrected themselves. Only then is the cleanup model worth its second or so; everything
 # else is tidied by the rules in tidy(), which is how the faster dictation apps do it.
-CUES = re.compile(r"\b(sorry|wait|scratch|i mean|actually|rather|rephrase|correction|start over|no,? no)\b", re.I)
+# Each of these costs a model call, 20 s or more when the model is swapped out, so ordinary uses are left out:
+# "sorry to interrupt", "I can't wait to", "I'd rather", "what actually happened", "from scratch".
+CUES = re.compile(r"\b(?:(?<!\bam )(?<!\bare )(?<!i'm )(?<!i’m )sorry(?!\s+(?:to|for|about)\b)|wait(?=[,.]|\s+(?:no|i mean)\b)|no,?\s+wait"
+                  r"|scratch that|i mean|(?<=, )actually|actually,?\s+no|no,?\s+actually|or rather|rephrase|correction|start over|no,? no)\b", re.I)
+# Opening a dictation there is nothing before them to correct: "Sorry, one question...", "No, I mean that..."
+OPENING = re.compile(r"^\W*(?:(?:no|um+|uh+),?\s+)*(?:sorry|i mean)\b", re.I)
 # Only complete, unambiguous courtesy sentences bypass the correction model.
 COURTESY = re.compile(r"(?:^|(?<=[.!?]))\s*sorry(?:,\s*|\s+)(?:i(?:['’]m| am) late|for (?:the )?delay)[.!?](?=\s|$)", re.I)
 # What a voice command must contain: a word that takes text back, or one that points at the text just typed. A short
@@ -1305,7 +1310,7 @@ def corrected(raw):
     sentence."""
     raw = fix_corrections(raw)
     sentences = re.split(r"(?<=[.!?])(?=\s)", raw)  # each keeps the space before it, which may be a paragraph break
-    cued = [bool(CUES.search(COURTESY.sub("", s))) for s in sentences] + [False]
+    cued = [bool(CUES.search(COURTESY.sub("", OPENING.sub("", s) if i == 0 else s))) for i, s in enumerate(sentences)] + [False]
     out = ""
     for send, run in itertools.groupby(range(len(sentences)), lambda i: cued[i] or cued[i + 1]):
         text = "".join(sentences[i] for i in run)

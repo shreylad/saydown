@@ -215,6 +215,41 @@ class SpeechTests(unittest.TestCase):
             self.assertEqual(self.a.corrected("We need more staff, wait, no, I mean fewer."), "Fewer staff.")
         model.assert_called_once()
 
+    def test_ordinary_uses_of_correction_words_skip_the_model(self):
+        for text in ("Sorry to interrupt you, but I have one question.",
+                     "Sorry, please cancel the flight.",
+                     "Sorry I am late",
+                     "Sorry, which color do you prefer?",
+                     "I mean the blue one is nicer.",
+                     "No, I mean that the parcel has arrived.",
+                     "Hey, can you try this? Actually I baked it first.",
+                     "She knows what actually happened.",
+                     "I would rather take the train.",
+                     "Bake the cake from the scratch.",
+                     "I can't wait to see it.",
+                     "Please wait for the report.",
+                     "I am sorry for the delay.",
+                     "We are sorry about that, truly."):
+            with self.subTest(text=text), patch.object(self.a, "clean", side_effect=AssertionError("model called")):
+                self.a.corrected(text)
+
+    def test_real_corrections_the_rule_cannot_resolve_still_reach_the_model(self):
+        for text in ("Send the parcel by Thursday. Sorry, Friday.",
+                     "Use the red pen and blue sorry blue only.",
+                     "I want some green sorry I want some tea.",
+                     "The forecast for quarter 4 looks strong, wait, no, I mean quarter 1, assuming bookings hold.",
+                     "It uses the, system, I mean the long system for storage.",
+                     "We need more staff, wait, fewer.",
+                     "We need more staff, or rather fewer.",
+                     "Keep the staff. Actually, no, cut them.",
+                     "Keep the staff, actually cut them.",
+                     "Keep the staff. Scratch that.",
+                     "Keep the staff. Let me rephrase.",
+                     "Keep the staff. Start over."):
+            with self.subTest(text=text), patch.object(self.a, "clean", return_value="Model.") as model:
+                self.a.corrected(text)
+                model.assert_called()
+
     def test_phrases_fall_back_to_the_whole_recording(self):
         audio = self.speech((6, True), (0.6, False), (2, True))
         with tempfile.NamedTemporaryFile(suffix=".f32", delete=False) as f:
@@ -681,10 +716,8 @@ class SpeechTests(unittest.TestCase):
     def test_corrections_still_use_the_model_including_after_apologies(self):
         samples = ["Send it Tuesday, sorry, Wednesday.",
                    "Sorry I am late. Send it Tuesday, no wait, Wednesday.",
-                   "Sorry, please cancel the flight.",
                    "I think we should, actually scratch that, send the invoice.",
-                   "Sorry I'm late, no wait, I mean early.",
-                   "Sorry I am late"]
+                   "Sorry I'm late, no wait, I mean early."]
         for text in samples:
             with patch.object(self.a, "clean", return_value="Corrected text.") as clean:
                 self.assertEqual(self.a.polish(text), "Corrected text.")
