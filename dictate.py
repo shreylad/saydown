@@ -1245,9 +1245,65 @@ def spoken_bullets(text):
             ("\n\n" + tail if tail else ""))
 
 
+CORRECTION = re.compile(r"(?P<lead>[,.;!?\- ]*)\b(?:(?P<cue>wait,?\s+no|no,?\s+wait|wait|sorry|no|actually(?:,?\s+no)?)[,.]?\s+)?"
+                        r"(?:i mean|i meant|make that)[,:]?\s+(?P<new>[^\n]+?)(?=[.!?](?:\s|$)|\n|$)", re.I)
+WORD_KINDS = (
+    re.compile(r"(?:mon|tues|wednes|thurs|fri|satur|sun)day|today|tomorrow|yesterday", re.I),
+    re.compile(r"january|february|march|april|may|june|july|august|september|october|november|december", re.I),
+    re.compile(r"\$?\d[\d,.:]*\S*"),
+)
+
+
+def replaced(before, new, explicit):
+    """The sentence ending in before, with the words that new corrects swapped; None unless it is clear which they are."""
+    words = new.split()
+    if ", " in new or len(words) > 4:
+        return None
+    start = max((m.end() for m in re.finditer(r"[.!?]\s|\n", before)), default=0)
+    tokens = before[start:].split()
+    if not tokens:
+        return None
+
+    def bare(token):
+        return token.strip(",;:.!?\"'()")
+
+    tail = range(len(tokens) - 1, max(len(tokens) - 7, -1), -1)  # the nearest first, at most six words back
+    kind = next((k for k in WORD_KINDS if k.fullmatch(bare(words[0]))), None)
+    at = next((i for i in tail if kind and kind.fullmatch(bare(tokens[i]))), None)
+    if at is not None:
+        tokens[at:at + 1 if len(words) == 1 else len(tokens)] = words
+    elif explicit is not None or len(words) > 1:
+        same = next((i for i in tail if len(words) > 1 and bare(tokens[i]).casefold() == bare(words[0]).casefold()), None)
+        if same is not None:  # "at the office ... the cafe"
+            tokens[same:] = words
+        elif words[0][0].isupper() and bare(tokens[-1])[:1].isupper() and len(tokens) > 1 and explicit is not None:  # names
+            tokens[-1:] = words
+        else:
+            return None
+    else:
+        return None
+    return before[:start] + " ".join(tokens)
+
+
+def fix_corrections(text):
+    """Resolve "on Tuesday, wait, no, I mean Thursday" by rule. The model takes 1 s at best, and 20 s or more when
+    macOS has swapped it out. Anything unclear is left for the model."""
+    at = 0
+    while match := CORRECTION.search(text, at):
+        crossed = re.search(r"[.!?]", match["lead"])  # a bare "I mean" opening a sentence is rarely a correction
+        fixed = None if crossed and not match["cue"] else replaced(text[:match.start()], match["new"], match["cue"])
+        if fixed is None:
+            at = match.end()
+        else:
+            text, at = fixed + text[match.end():], len(fixed)
+    return text
+
+
 def corrected(raw):
-    """Tidied by rule, except where the speaker corrected themselves: that sentence and the one before it go to the
-    model. Only those, as the model takes ~6s to rewrite a minute of speech and ~1s for a sentence."""
+    """Tidied by rule, except where the speaker corrected themselves in a way the rule can't resolve: that sentence and
+    the one before it go to the model. Only those, as the model takes ~6s to rewrite a minute of speech and ~1s for a
+    sentence."""
+    raw = fix_corrections(raw)
     sentences = re.split(r"(?<=[.!?])(?=\s)", raw)  # each keeps the space before it, which may be a paragraph break
     cued = [bool(CUES.search(COURTESY.sub("", s))) for s in sentences] + [False]
     out = ""

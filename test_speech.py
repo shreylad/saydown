@@ -109,9 +109,9 @@ class SpeechTests(unittest.TestCase):
 
     def test_money_is_joined_before_selecting_self_correction_sentences(self):
         raw = "Revenue was $48,375. and 62 cents. Wait, I mean $50,000."
-        with patch.object(self.a, "clean", return_value="Revenue was $50,000.") as clean:
+        with patch.object(self.a, "clean") as clean:
             self.assertEqual(self.a.polish(raw), "Revenue was $50,000.")
-        clean.assert_called_once_with("Revenue was $48,375.62. Wait, I mean $50,000.")
+        clean.assert_not_called()
 
     def test_pause_at_cuts_only_in_a_real_pause_after_a_full_phrase(self):
         rate = self.a.RATE
@@ -177,6 +177,43 @@ class SpeechTests(unittest.TestCase):
                                    ("We run Kubernetis here.", "We run Kubernetes here.")):
                 with self.subTest(text=text):
                     self.assertEqual(self.a.fuzzy(text), expected)
+
+    def test_clear_self_corrections_are_resolved_without_the_model(self):
+        for said, expected in (
+                ("We should send the report on Tuesday, wait, no, I mean Thursday.", "We should send the report on Thursday."),
+                ("We should send the report on Tuesday. Wait, no, I mean Thursday.", "We should send the report on Thursday."),
+                ("Meet on Tuesday, I mean Thursday.", "Meet on Thursday."),
+                ("Meet on Tuesday morning, no wait, I mean Thursday.", "Meet on Thursday morning."),
+                ("Next Tuesday, sorry, I mean next Thursday morning.", "Next Thursday morning."),
+                ("It launches in March, wait, no, I mean April. Tell the team.", "It launches in April. Tell the team."),
+                ("It costs $50 a month, wait, no, I mean $60.", "It costs $60 a month."),
+                ("It costs $48.50, wait, no, I mean $49.75.", "It costs $49.75."),
+                ("Buy 3 new laptops, wait, no, I mean 4.", "Buy 4 new laptops."),
+                ("Call at 3 pm, wait, no, make that 4 pm.", "Call at 4 pm."),
+                ("Buy 3 new laptops, wait, no, I mean 4 tablets.", "Buy 4 tablets."),
+                ("Meet at the office, wait, no, I mean the cafe.", "Meet at the cafe."),
+                ("Email John, wait, no, I mean Jane Doe.", "Email Jane Doe."),
+                ("First one. Meet on Monday, I mean Friday. Last one.", "First one. Meet on Friday. Last one."),
+                ("Tuesday, I mean Wednesday. Monday, I mean Friday.", "Wednesday. Friday.")):
+            with self.subTest(said=said), patch.object(self.a, "clean", side_effect=AssertionError("model called")):
+                self.assertEqual(self.a.corrected(said), expected)
+
+    def test_unclear_or_ordinary_wording_is_not_rewritten_by_the_rule(self):
+        for text in ("I can't wait, no problem at all.",
+                     "Please make that call.",
+                     "I mean the results were good overall this week.",
+                     "The report was good. I mean the results.",
+                     "We need more staff, wait, no, I mean fewer.",
+                     "Meet on Tuesday, wait, no, I mean Thursday, and call the whole team.",
+                     "I mean Thursday.",
+                     "Line one on Tuesday.\nI mean Thursday."):
+            with self.subTest(text=text):
+                self.assertEqual(self.a.fix_corrections(text), text)
+
+    def test_a_correction_the_rule_cannot_resolve_still_goes_to_the_model(self):
+        with patch.object(self.a, "clean", return_value="Fewer staff.") as model:
+            self.assertEqual(self.a.corrected("We need more staff, wait, no, I mean fewer."), "Fewer staff.")
+        model.assert_called_once()
 
     def test_phrases_fall_back_to_the_whole_recording(self):
         audio = self.speech((6, True), (0.6, False), (2, True))
@@ -743,9 +780,9 @@ class SpeechTests(unittest.TestCase):
 
     def test_self_correction_is_cleaned_before_list_formatting(self):
         raw = "First send it Tuesday, I mean Wednesday. Second archive it."
-        with patch.object(self.a, "clean", return_value="First send it Wednesday.") as clean:
+        with patch.object(self.a, "clean") as clean:
             self.assertEqual(self.a.polish(raw), "1. Send it Wednesday.\n2. Archive it.")
-        clean.assert_called_once_with("First send it Tuesday, I mean Wednesday.")
+        clean.assert_not_called()
 
     def test_list_formatting_preserves_dictionary_spellings(self):
         with patch.object(self.a, "term_list", return_value=["apple tree -> AppleTree"]):
