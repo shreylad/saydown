@@ -964,6 +964,21 @@ def pause_at(audio, start):
     return start + (int(runs[0]) + need // 2) * frame if len(runs) else None
 
 
+ABBREVIATION = r"\b(?:mr|mrs|ms|dr|prof|sr|jr|vs|etc|e\.g|i\.e|a\.m|p\.m)\."
+
+
+def join_phrases(texts):
+    """All the phrases as one text. Whisper hears each alone, so it ends a phrase with a stop even mid-sentence."""
+    joined = ""
+    for text in filter(None, texts):
+        # ponytail: a lowercase next word is the only sign; a missing stop before a capital is left alone
+        if joined.endswith(".") and re.match(r"[a-z]+(?![^\W\d_])", text) and not joined.endswith("..") \
+                and not re.search(ABBREVIATION + "$", joined, re.I):
+            joined = joined[:-1]
+        joined += (" " if joined else "") + text
+    return joined
+
+
 class Phrases:
     """Transcribes a recording phrase by phrase while it is still being made, as Glaido and Wispr Flow do, so that
     when the key goes up only the last phrase is left. One per recording."""
@@ -1011,7 +1026,7 @@ class Phrases:
             self.done, self.texts = 0, []
         if len(audio) - self.done >= RATE * TAP or not self.texts:
             self.hear(audio[self.done:])
-        return " ".join(t for t in self.texts if t), self.where
+        return join_phrases(self.texts), self.where
 
 
 def listen_locally(audio, language, whisper):
@@ -1055,7 +1070,8 @@ def fuzzy(text):
     # ponytail: single words, matched by spelling and first letter; add sound matching (Soundex) if names slip through
     known = {}
     for term in term_list():
-        if "->" not in term and " " not in term and len(term) >= 5:
+        # not "shreylad.com": only letters are compared, so "shreylad" would match it and keep its own ".com" after
+        if "->" not in term and " " not in term and "." not in term and len(term) >= 5:
             known.setdefault(term[0].lower(), {})[term.lower()] = term
     if not known:
         return text
@@ -1091,8 +1107,7 @@ def list_mask(text):
     if quote or brackets:
         return None
     masked = "".join(masked)
-    return re.sub(r"\b(?:mr|mrs|ms|dr|prof|sr|jr|vs|etc|e\.g|i\.e)\.",
-                  lambda m: m.group().replace(".", "~"), masked, flags=re.I)
+    return re.sub(ABBREVIATION, lambda m: m.group().replace(".", "~"), masked, flags=re.I)
 
 
 def spoken_list(text):

@@ -141,6 +141,43 @@ class SpeechTests(unittest.TestCase):
         self.assertEqual(phrases.finish(whole), ("part1 part2 part3", "local"))
         self.assertEqual(sum(heard), len(audio))  # every sample transcribed once
 
+    def test_a_stop_at_a_phrase_cut_goes_when_the_sentence_carries_on(self):
+        for parts, expected in (
+                (["we moved local speech.", "back to whisper."], "we moved local speech back to whisper."),
+                (["It came in at $142.00.", "and ADR was $189."], "It came in at $142.00 and ADR was $189."),
+                (["One.", "two.", "three."], "One two three."),
+                (["A real sentence.", "Another one."], "A real sentence. Another one."),
+                (["Is it working?", "and then what."], "Is it working? and then what."),
+                (["Bread, milk, etc.", "and more."], "Bread, milk, etc. and more."),
+                (["We start at 9 a.m.", "and finish at noon."], "We start at 9 a.m. and finish at noon."),
+                (["Wait for it...", "and go."], "Wait for it... and go."),
+                (["I bought one.", "iPhone sales grew."], "I bought one. iPhone sales grew."),
+                (["Sales rose.", "$5 more."], "Sales rose. $5 more."),
+                (["", "only this."], "only this."),
+                ([], "")):
+            with self.subTest(parts=parts):
+                self.assertEqual(self.a.join_phrases(parts), expected)
+
+    def test_finish_joins_phrases_without_the_stop_at_the_cut(self):
+        audio = self.speech((6, True), (0.6, False), (2, True))
+        texts = iter(["the quiet mistake.", "that I would like to stop."])
+        self.local.side_effect = lambda clip, **_: {"text": next(texts), "segments": []}
+        with tempfile.NamedTemporaryFile(suffix=".f32", delete=False) as f:
+            f.write(audio.tobytes())
+        phrases = self.a.Phrases(f.name, "en", self.local)
+        deadline = self.a.time.time() + 5
+        while not phrases.done and self.a.time.time() < deadline:
+            self.a.time.sleep(0.05)
+        self.assertEqual(phrases.finish(phrases.end())[0], "the quiet mistake that I would like to stop.")
+
+    def test_fuzzy_leaves_a_web_address_whole_and_still_fixes_near_words(self):
+        with patch.object(self.a, "term_list", return_value=["shreylad.com", "x.com", "Kubernetes"]):
+            for text, expected in (("Link on shreylad.com before noon.", "Link on shreylad.com before noon."),
+                                   ("Shreylad said hello.", "Shreylad said hello."),
+                                   ("We run Kubernetis here.", "We run Kubernetes here.")):
+                with self.subTest(text=text):
+                    self.assertEqual(self.a.fuzzy(text), expected)
+
     def test_phrases_fall_back_to_the_whole_recording(self):
         audio = self.speech((6, True), (0.6, False), (2, True))
         with tempfile.NamedTemporaryFile(suffix=".f32", delete=False) as f:
