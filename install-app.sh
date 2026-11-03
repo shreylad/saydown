@@ -116,16 +116,44 @@ for size in (16, 32, 128, 256, 512):
 EOF
 iconutil -c icns "$ICONSET" -o "$ICON"
 
-# Ad-hoc signatures change when bundled code changes. Routine updates use update_app.py.
-codesign --force --deep --sign - "$APP"
+# Signing. With SAYDOWN_SIGN="Developer ID Application: Name (TEAMID)" the app is signed for Gatekeeper and the DMG
+# notarised, so it opens on any Mac with no warning; one-time setup in the terminal:
+#   xcrun notarytool store-credentials saydown --apple-id <Apple ID> --team-id <TEAMID> --password <app-specific password>
+# Unset, the build is ad hoc signed and macOS asks each downloader to approve it under Privacy & Security.
+SIGN="${SAYDOWN_SIGN:--}"
+[ "$SIGN" = "-" ] && STAMP="" || STAMP="--timestamp"
+ENT="$(mktemp).plist"
+cat > "$ENT" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>com.apple.security.device.audio-input</key><true/>
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key><true/>
+    <key>com.apple.security.cs.disable-library-validation</key><true/>
+</dict>
+</plist>
+EOF
+# notarisation wants every Mach-O inside the app signed with the hardened runtime, and `codesign --deep` skips
+# the ones under Resources (Python and its packages), so sign them one by one, then the app itself
+find "$APP/Contents/Resources" -type f \( -perm +111 -o -name "*.so" -o -name "*.dylib" \) \
+    -exec sh -c 'file -b "$1" | grep -q Mach-O' _ {} \; -print0 \
+    | xargs -0 codesign --force --options runtime $STAMP --entitlements "$ENT" --sign "$SIGN"
+codesign --force --options runtime $STAMP --entitlements "$ENT" --sign "$SIGN" "$APP"
+codesign --verify --strict --deep "$APP"
 touch "$APP"
 
-# ponytail: ad-hoc signed, so macOS asks each downloader to approve it under Privacy & Security;
-# sign with a Developer ID and notarise here once there is an Apple Developer account
 STAGE="$(mktemp -d)"
 cp -R "$APP" "$STAGE/"
 ln -s /Applications "$STAGE/Applications"
 hdiutil create -quiet -volname Saydown -srcfolder "$STAGE" -ov -format UDZO "$HERE/dist/Saydown.dmg"
+if [ "$SIGN" != "-" ]; then
+    # ponytail: only the DMG is notarised and stapled; an app dragged out of it is checked online on first open
+    [ -x "$CLT/usr/bin/notarytool" ] && XCRUN="env DEVELOPER_DIR=$CLT xcrun" || XCRUN="xcrun"
+    codesign --force --timestamp --sign "$SIGN" "$HERE/dist/Saydown.dmg"
+    $XCRUN notarytool submit "$HERE/dist/Saydown.dmg" --keychain-profile "${SAYDOWN_NOTARY:-saydown}" --wait
+    $XCRUN stapler staple "$HERE/dist/Saydown.dmg"
+fi
 echo "Built $APP and $HERE/dist/Saydown.dmg"
 echo "On first launch, allow Microphone, Accessibility and Input Monitoring for Saydown, then open it again."
 echo "Log: ~/Library/Logs/saydown.log"

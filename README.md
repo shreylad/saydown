@@ -64,7 +64,7 @@ This copies the code in this folder into the `Saydown.app` already in your Appli
 ./install-app.sh --release
 ```
 
-This builds `dist/Saydown.app` and `dist/Saydown.dmg` with Python and every package inside, so it runs on a Mac with nothing installed. It is ad-hoc signed; signing with an Apple Developer ID and notarising it would remove the "cannot verify" step for people who download it.
+This builds `dist/Saydown.app` and `dist/Saydown.dmg` with Python and every package inside, so it runs on a Mac with nothing installed. It is ad-hoc signed unless `SAYDOWN_SIGN="Developer ID Application: Name (TEAMID)"` is set, in which case the app is signed with the hardened runtime and the DMG notarised and stapled, which removes the "cannot verify" step for people who download it. That needs the Apple Developer Program and a one-time `xcrun notarytool store-credentials saydown --apple-id <Apple ID> --team-id <TEAMID> --password <app-specific password>`.
 
 ## Usage
 
