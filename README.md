@@ -266,4 +266,4 @@ The first checks the settings and the text rules in about a second, with no mode
 
 ## Licence
 
-MIT. See `LICENSE`.
+GPL-3.0. See `LICENSE`.
