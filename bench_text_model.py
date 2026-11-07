@@ -1,4 +1,4 @@
-"""Score a text model on everything Saydown asks of one: uv run --with-requirements <(uv export --script dictate.py) bench.py mlx-community/gemma-4-e4b-it-5bit (or openrouter:google/gemma-4-26b-a4b-it, key in API_KEY)
+"""Score a text model on everything Saydown asks of one: uv run --with-requirements <(uv export --script dictate.py) bench_text_model.py mlx-community/gemma-4-e4b-it-5bit (or openrouter:google/gemma-4-26b-a4b-it, key in API_KEY)
 
 Runs every check without stopping at the first failure and prints pass counts and timings per group.
 """

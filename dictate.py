@@ -8,7 +8,7 @@
 """Hold right Option, talk, release: local dictation with optional paid OpenAI speech.
 
 Run:  uv run dictate.py          (the first run downloads the models)
-Test: uv run dictate.py --test   (checks the settings and the text rules; bench.py checks the model)
+Test: uv run dictate.py --test   (checks the settings and the text rules; bench_text_model.py checks the model)
 """
 import ctypes, datetime, difflib, io, itertools, json, math, os, queue, random, re, select, ssl, subprocess, sys, tempfile, threading, time, traceback, unicodedata, urllib.request, uuid, wave, webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -107,7 +107,7 @@ _key_status = {provider: [0.0, False] for provider in KEYCHAINS}
 _key_cache = {}  # secrets stay in process memory; None means access was denied this session
 _key_lock = threading.RLock()
 # The one text model (5.7 GB), as a Hugging Face repository; there is no choice in Settings. Score a candidate with
-# bench.py before changing it: the 5-bit build passes all 42 checks, the 4-bit one misses two.
+# bench_text_model.py before changing it: the 5-bit build passes all 42 checks, the 4-bit one misses two.
 TEXT_MODEL = "mlx-community/gemma-4-e4b-it-5bit"
 EMBED_MODEL = "mlx-community/embeddinggemma-300m-4bit"  # 0.2 GB; without it Ask falls back to keyword matching
 IDLE = 4 * 3600  # seconds unused before the text model, about 5 GB of memory, is dropped; loading it again takes ~3s

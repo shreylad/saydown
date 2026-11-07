@@ -4,6 +4,18 @@ Hold a key, talk, release. Cleaned-up text is pasted at your cursor, in any app.
 
 A personal dictation app for Apple Silicon Macs. By default, speech is transcribed by Whisper and tidied by a small language model on your Mac. You can also choose paid [OpenAI](#paid-speech-through-openai) or [OpenRouter](#paid-speech-through-openrouter) transcription in Settings; those options upload audio and dictionary hints.
 
+## Stack
+
+| Layer | What |
+|---|---|
+| Language | Python 3.11, a single-file [uv script](https://docs.astral.sh/uv/guides/scripts/) with inline dependencies |
+| Speech to text | [mlx-whisper](https://github.com/ml-explore/mlx-examples) running Whisper Large V3 Turbo on the Apple GPU |
+| Text cleanup, Rewrite, Ask | [mlx-lm](https://github.com/ml-explore/mlx-lm) running Gemma 4 E4B, plus mlx-embeddings for search by meaning |
+| Hotkey, pill, paste | AppKit and Quartz through PyObjC |
+| Window | Plain HTML and JavaScript in `ui.html`, shown in a WebKit view, talking to Python over a localhost-only server |
+| Packaging | `install-app.sh` builds a signed `.app` and `.dmg` with Python bundled; `launcher.m` is the native entry point |
+| Tests | `unittest`; `bench_text_model.py` scores a text model on 42 real dictations |
+
 ## What it does
 
 - **Push to talk.** Hold the right Option key, speak, release.
@@ -76,27 +88,13 @@ Click into any text field, then either:
 
 Clicking the pill never takes focus from the app you are typing in. Recordings shorter than 0.3 seconds are ignored as accidental taps.
 
-Consecutive spoken lists are formatted automatically: say "First, review the report. Second, send the invoice" and Saydown pastes `1. Review the report.` and `2. Send the invoice` on separate lines. It keeps an introduction above the list and handles an immediate label correction such as "second third agenda". This works with local and API dictation, uses no extra model call, and recognizes English ordinal labels from first through tenth (including `1st`, `2nd`, and `3rd`). Ordinary phrases such as "first time" and "second thoughts" stay as prose. Newlines are pasted as text; Tab is not sent to another field. This formats a list within one recording; separate recordings are handled independently.
-
-Unnumbered lists also become bullets when you introduce them clearly, for example: "Here is our agenda for the day. Cooking at home, working on the app, freely running on the lawn and working on the computer." Each activity is pasted on its own bullet line. Saydown recognizes English introductions such as agenda, tasks, goals, priorities, to-do list, and shopping list. It preserves compound phrases such as "research and development," commas inside parentheses or quoted titles, and numeric commas. This uses no extra model call. It formats the sentence following the introduction within the same recording; ordinary prose without a list introduction stays unchanged.
-
-You can also say "This is the agenda of the day I am going to cook, I am going to drive my car, I am going to clean the garden and I am going to work on the app." The introduction needs no spoken punctuation. Repeated action phrases such as "I am going to," "I'm going to," "we will," and "I need to" mark separate bullets, including when the transcription leaves out commas. Repeated action sentences continue the same list; a closing remark stays in its own paragraph. Words within each task are preserved.
-
-Other supported introductions include "Here are the things I need to do," "Here's what I need to do," "I have three things to do," and "My plans for today." Imperative tasks such as "cook dinner and drive my car and clean the garden" and short noun lists such as "apples, milk and bread" are supported. A comma can separate the introduction from the items if transcription changes a colon into a comma. Most formatting uses fast rules and requires an explicit list introduction or consecutive ordinal labels. Quoted text, parenthesized content, common abbreviations, compound phrases, and existing line breaks are preserved.
-
-An explicitly introduced shopping list with missing noun boundaries ("shopping list apples milk and bread") uses the existing local text model as a fallback. Its output must consist of ordered, verbatim substrings covering the complete list, with known compound items kept together. Invented, dropped, reordered, or altered items are rejected. No additional API call is made. This ambiguous case can take longer, especially while the text model loads. When the model is unavailable or validation fails, the original text is retained. The Bullet points rewrite style remains available for other ambiguous lists.
+Spoken lists are formatted by rule, with no model call. "First, review the report. Second, send the invoice" becomes two numbered lines, and "Here is my agenda: cook, work on the app, mow the lawn" becomes three bullets. The exact rules, and what they deliberately leave alone, are in [docs/list-formatting.md](docs/list-formatting.md).
 
 If Accessibility is unavailable at delivery time, Saydown keeps the completed dictation on the clipboard for manual paste and shows a message. History and Copy buttons remain available during permission setup. A local speech-model loading failure is shown in Setup, and the worker remains available for an API provider. Incomplete or corrupt history lines are skipped when displaying history; the original history file is not modified.
 
 ## Updating this personal installation
 
-`./install-app.sh` calls `update_app.py` rather than rebuilding the app. Python/UI updates are stored as versioned files under `~/Library/Application Support/Saydown/Runtime`, selected by an atomic pointer, without changing or re-signing the app bundle. The bundled Python and native launcher remain in the app. Changing either of those, or `runtime_bootstrap.py`, needs a new `--release` build and can require renewed permissions; the updater refuses to run when the bootstrap differs.
-
-Each runtime has a manifest of file hashes and must match the bundled fallback version. An incomplete, corrupt, or incompatible runtime falls back to the bundled implementation. Updates retain the previous runtimes, so pointing `Runtime/current.json` back at one undoes an update; an installation failure restores the previous pointer. Startup never runs `tccutil reset` automatically. Permission grants remain under the user's control; if an old grant is stale, remove and re-add Saydown manually in System Settings.
-
-Regression checks: `python -B -m unittest test_speech test_runtime -q` with the app's bundled Python and site-packages. Keep `-B`: without it Python writes cache files into the app, which invalidates its signature and blocks the next update. `bench_dictation.py --output /path/to/report-directory` exercises local Whisper and formatting on synthetic English TTS fixtures, using the cached model and isolated settings. It does not use the microphone or paid APIs. Synthetic results do not establish accuracy for accents, background noise, or arbitrary real recordings.
-
-The terminal logs every dictation with the raw transcription beside the cleaned text, so you can see which step made a mistake.
+`./install-app.sh` copies the Python and UI files into the installed app as a versioned runtime, without rebuilding or re-signing it, so macOS does not ask for permissions again. How the runtime pointer, manifests and rollback work is in [docs/updating.md](docs/updating.md).
 
 ## Rewrite styles
 
@@ -175,7 +173,7 @@ x ai -> xAI
 | Save history | Settings tab | on |
 | Whisper model | `WHISPER` at the top of `dictate.py` | `whisper-large-v3-turbo` |
 
-On a 16 GB M5 MacBook Air, scored with `bench.py` (42 checks of cleanup, rewriting, editing, voice commands and Ask):
+On a 16 GB M5 MacBook Air, scored with `bench_text_model.py` (42 checks of cleanup, rewriting, editing, voice commands and Ask):
 
 | Model | Score | A typical cleanup | Notes |
 |---|---|---|---|
@@ -233,6 +231,21 @@ successful key save clears the earlier failure message.
 The same local fallback applies if the key is missing, the request fails, or
 the upload exceeds the limit. Cleanup, Ask, rewriting, and history remain local.
 
+## Project layout
+
+| File | Role |
+|---|---|
+| `dictate.py` | The app: hotkey, recording, transcription, cleanup, Rewrite, Ask, settings, and the localhost server behind the window |
+| `ui.html` | The window: history, Ask, dictionary, styles, settings |
+| `launcher.m` | Native launcher compiled into the `.app`; starts the bundled Python |
+| `runtime_bootstrap.py` | Picks the current runtime version at launch and falls back to the bundled one |
+| `update_app.py` | Installs a new runtime version into the app (see [docs/updating.md](docs/updating.md)) |
+| `install-app.sh` | Builds the `.app` and `.dmg`, or updates an installed app |
+| `test_speech.py`, `test_runtime.py`, `test_recorder.py`, `test_ui.js` | Unit tests for cleanup rules and API fallbacks, the runtime updater, the recorder helper, and the window |
+| `bench_text_model.py` | Scores a text model (local or cloud) on 42 real dictations |
+| `bench_dictation.py` | End-to-end check of local Whisper plus formatting on synthetic speech |
+| `docs/` | Longer notes: list formatting rules, the update mechanism |
+
 ## How it works
 
 1. A native macOS key monitor watches for the hotkey and `sounddevice` records while it is held.
@@ -250,10 +263,10 @@ The logic is in `dictate.py`; the window's layout is in `ui.html`.
 
 ```sh
 uv run dictate.py --test
-uv run --with-requirements <(uv export --script dictate.py) bench.py mlx-community/gemma-4-e4b-it-5bit
+uv run --with-requirements <(uv export --script dictate.py) bench_text_model.py mlx-community/gemma-4-e4b-it-5bit
 ```
 
-The first checks the settings and the text rules in about a second, with no model. The second runs raw transcripts, rewrites, edits, voice commands and Ask through the text model and prints what passed. When the tool gets one of your dictations wrong, add it to the cleanup list in `bench.py` so a later prompt change cannot quietly break it again.
+The first checks the settings and the text rules in about a second, with no model. The second runs raw transcripts, rewrites, edits, voice commands and Ask through the text model and prints what passed. When the tool gets one of your dictations wrong, add it to the cleanup list in `bench_text_model.py` so a later prompt change cannot quietly break it again.
 
 ## Known limits
 
