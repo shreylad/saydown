@@ -2,13 +2,13 @@
 
 Hold a key, talk, release. Cleaned-up text is pasted at your cursor, in any app.
 
-A personal dictation app for Apple Silicon Macs. By default, speech is transcribed by Whisper and tidied by a small language model on your Mac. You can also choose paid [OpenAI](#paid-speech-through-openai) or [OpenRouter](#paid-speech-through-openrouter) transcription in Settings; those options upload audio and dictionary hints.
+A personal dictation app for Apple Silicon Macs. By default, speech is transcribed by Whisper and tidied by a small language model on your Mac. You can also choose paid [OpenAI](#paid-speech-through-openai), [OpenRouter](#paid-speech-through-openrouter) or [DeepInfra](#paid-speech-and-ai-features-through-deepinfra) transcription in Settings; those options upload audio and dictionary hints. Separately, the AI features can [run on a paid API](#ai-features-on-a-paid-api), which uploads the text of your dictations.
 
 ## Stack
 
 | Layer | What |
 |---|---|
-| Language | Python 3.11, a single-file [uv script](https://docs.astral.sh/uv/guides/scripts/) with inline dependencies |
+| Language | Python 3.11 or later (the app bundles 3.12), a single-file [uv script](https://docs.astral.sh/uv/guides/scripts/) with inline dependencies |
 | Speech to text | [mlx-whisper](https://github.com/ml-explore/mlx-examples) running Whisper Large V3 Turbo on the Apple GPU |
 | Text cleanup, Rewrite, Ask | [mlx-lm](https://github.com/ml-explore/mlx-lm) running Gemma 4 E4B, plus mlx-embeddings for search by meaning |
 | Hotkey, pill, paste | AppKit and Quartz through PyObjC |
@@ -34,7 +34,7 @@ A personal dictation app for Apple Silicon Macs. By default, speech is transcrib
 For an Apple Silicon Mac running macOS 14 or later. Nothing else needs to be installed first. On Windows? See [Saydown for Windows](https://github.com/shreylad/saydown-windows).
 
 1. Download `Saydown.dmg` from the [latest release](https://github.com/shreylad/saydown/releases/latest), open it, and drag Saydown into Applications.
-2. Open Saydown. macOS will say it cannot verify the app, because it is not signed with an Apple developer account. Go to System Settings → Privacy & Security, scroll down, and click **Open Anyway**.
+2. Open Saydown. If macOS says it cannot verify the app, the download was built without an Apple developer account: go to System Settings → Privacy & Security, scroll down, and click **Open Anyway**.
 3. Follow the **Setting up Saydown** card in the window. It has an Open Settings button for each permission (Accessibility and Input Monitoring) and restarts Saydown once both are on. macOS also asks for the Microphone; click Allow.
 4. Leave it open while it finishes setting itself up. It downloads the speech model (about 1.6 GB), showing progress on the same card, and you can dictate as soon as it is ready. The AI features (Rewrite, Ask, voice commands, fixing self-corrections) are optional: turn them on in Settings or on the setup card, and Saydown downloads their models (about 6 GB).
 
@@ -68,7 +68,7 @@ macOS will ask the app you launch it from (Terminal, iTerm, ...) for three permi
 ./install-app.sh
 ```
 
-This copies the code in this folder into the `Saydown.app` already in your Applications folder; restart Saydown to use it. Nothing is rebuilt or re-signed, so macOS does not ask for permissions again. With no app installed yet, build one first with `--release` (below) and drag it to Applications. The log is at `~/Library/Logs/saydown.log`.
+This installs the code in this folder for the `Saydown.app` already in your Applications folder; restart Saydown to use it. Nothing is rebuilt or re-signed, so macOS does not ask for permissions again. It works only with an app you built yourself with `SAYDOWN_LOCAL_UPDATES=1 ./install-app.sh --release`; the download ignores such updates, because they are code that any program on the Mac could replace. With no app installed yet, build one that way first (below) and drag it to Applications. The log is at `~/Library/Logs/saydown.log`.
 
 ### Building the download
 
@@ -94,7 +94,7 @@ If Accessibility is unavailable at delivery time, Saydown keeps the completed di
 
 ## Updating this personal installation
 
-`./install-app.sh` copies the Python and UI files into the installed app as a versioned runtime, without rebuilding or re-signing it, so macOS does not ask for permissions again. How the runtime pointer, manifests and rollback work is in [docs/updating.md](docs/updating.md).
+`./install-app.sh` stores the Python and UI files beside your data as a versioned runtime, without rebuilding or re-signing the app, so macOS does not ask for permissions again. Only an app built with `SAYDOWN_LOCAL_UPDATES=1` uses it. How the runtime pointer, manifests and rollback work is in [docs/updating.md](docs/updating.md).
 
 ## Rewrite styles
 
@@ -106,7 +106,7 @@ The same panel has a box for a one-off instruction, such as "make it more confid
 
 ## Ask
 
-The Ask tab answers questions from your saved dictations, such as "what did I say about pricing?", and lists the dictations it cited. It finds the dictations closest in meaning to your question, so "how much will we charge" finds what you said about pricing. This uses a second, small model (0.2 GB) that Saydown downloads with the first; until it arrives Ask matches keywords instead. Questions about a time, such as "what did I say yesterday", are not found by date.
+The Ask tab answers questions from your saved dictations, such as "what did I say about pricing?", and lists the dictations it cited. It finds the dictations closest in meaning to your question, so "how much will we charge" finds what you said about pricing. This uses a second, small model (0.2 GB) that Saydown downloads with the first; until it arrives Ask matches keywords instead. Questions about a time, such as "what did I say yesterday", "last week" or "on Monday", look only at the dictations from those days.
 
 ## Notes
 
@@ -129,7 +129,7 @@ Recording already runs separately from transcription, so you can start the next
 recording while the previous dictation is processed. Two simultaneous Whisper
 model processes compete for the GPU and can increase individual request latency.
 
-Pasting uses the clipboard, and whatever you had copied is put back straight afterwards.
+Pasting uses the clipboard, and whatever you had copied is put back straight afterwards. The dictation is marked as passing through, so clipboard managers that follow the [nspasteboard.org](http://nspasteboard.org) convention leave it out of their history.
 
 While a password field has the keyboard, macOS hides key presses from every app, so a shortcut such as ⌘B cannot be seen. The pill says "Shortcut paused" until you leave the field; clicking the pill still works.
 
@@ -149,7 +149,7 @@ Siobhan
 Kubernetes
 ```
 
-The terms are given to Whisper as spelling hints and to the cleanup model as corrections for misheard words. The file is read on every dictation, so edits apply without a restart. It is git-ignored because it is personal.
+The terms are given to Whisper as spelling hints and to the cleanup model as corrections for misheard words. A word that is nearly a term of five letters or more is respelled ("Kubernetis" becomes Kubernetes), but an ordinary word one letter away, or the term with an ending such as -s or -ing, is left as you said it. The file is read on every dictation, so edits apply without a restart. It is git-ignored because it is personal.
 
 A line written as `heard -> written` always replaces one with the other, whatever the model does:
 
@@ -189,7 +189,7 @@ In your existing Saydown window, open **Settings → Speech-to-text**:
 3. Paste your OpenAI API key and click **Save key**. It goes directly to macOS Keychain, not settings, logs, or process arguments. The app never sends the saved key back to the settings page.
 4. Dictate normally with your existing shortcut or pill. Changes apply to the next dictation without a restart.
 
-API use is billed to your OpenAI API account separately from a ChatGPT subscription. OpenAI receives your recording and dictionary hints. Cleanup, Ask, rewriting, and history stay local.
+API use is billed to your OpenAI API account separately from a ChatGPT subscription. OpenAI receives your recording and dictionary hints. Cleanup, Ask, rewriting, and history stay local unless you also [run the AI features on a paid API](#ai-features-on-a-paid-api).
 
 Select **Local Whisper** to keep speech entirely on your Mac, even with a saved API key. **Remove key** deletes the Saydown key from Keychain. Saving a key alone does not switch a locally configured app to OpenAI.
 
@@ -229,7 +229,28 @@ prompt on every dictation. Save the key again in Settings or restart Saydown to
 retry. Settings labels old transcription results as **Last dictation**, and a
 successful key save clears the earlier failure message.
 The same local fallback applies if the key is missing, the request fails, or
-the upload exceeds the limit. Cleanup, Ask, rewriting, and history remain local.
+the upload exceeds the limit. Cleanup, Ask, rewriting, and history remain local
+unless you also [run the AI features on a paid API](#ai-features-on-a-paid-api).
+
+## Paid speech and AI features through DeepInfra
+
+Select **DeepInfra · paid API** under **Settings → Speech-to-text** and save a
+DeepInfra API key. It offers one speech model, Whisper Large V3 Turbo. DeepInfra
+receives your recording and dictionary hints, usage is billed to your DeepInfra
+account, and the key is stored as `saydown-deepinfra` in macOS Keychain. The
+same local fallback applies.
+
+## AI features on a paid API
+
+**Settings → Run AI features on** moves cleanup of self-corrections, Rewrite,
+Ask and voice commands from the model on your Mac to a larger Gemma model at
+OpenRouter or DeepInfra, using the key saved for that provider under
+Speech-to-text. This frees about 5 GB of memory. The provider then receives the
+text involved: the sentences being cleaned, the dictation being rewritten, and
+for Ask the saved dictations closest to your question. History itself stays in
+its file on your Mac, and search by meaning still runs locally. If a cleanup
+request fails, the text is tidied by rule instead. Choose **This Mac** to keep
+all text local.
 
 ## Project layout
 
@@ -250,7 +271,7 @@ the upload exceeds the limit. Cleanup, Ask, rewriting, and history remain local.
 
 1. A native macOS key monitor watches for the hotkey and `sounddevice` records while it is held.
 2. `mlx-whisper` transcribes the audio on the GPU.
-3. The cleanup model rewrites the transcript using the prompt in `dictate.py`.
+3. Rules tidy the transcript; only sentences where you corrected yourself go to the cleanup model, with the prompt in `dictate.py`.
 4. The result goes to the clipboard and is pasted with Cmd+V.
 
 The pill is a small AppKit panel drawn with PyObjC. The window is `ui.html` shown in a WebKit view; it talks to the dictation process over a localhost-only server that rejects requests from any other website.
@@ -272,8 +293,8 @@ The first checks the settings and the text rules in about a second, with no mode
 
 - Auto-detect can mistake a short non-English dictation for English; pick the language in Settings if you mostly dictate in one.
 - A microphone plugged in after launch appears in Settings only after a restart.
-- Dictating overwrites your clipboard.
-- The first dictation after about 30 idle minutes is slower while the model reloads.
+- Dictating passes through your clipboard: what you had copied is put back 0.4 seconds later, so an app slower than that to paste gets the old contents.
+- The first self-correction, Rewrite or Ask after four idle hours is about 3 seconds slower while the text model reloads.
 - Text appears when you release the key, not as you speak.
 - macOS on Apple Silicon only. For Windows, use [Saydown for Windows](https://github.com/shreylad/saydown-windows).
 

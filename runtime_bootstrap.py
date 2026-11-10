@@ -1,14 +1,22 @@
-"""Stable bundled entry point for local Saydown updates; no network or credential access."""
+"""Stable bundled entry point for local Saydown updates; no network or credential access.
+
+The runtime folder is beside the user's data, where any program run by the user can write, and Saydown holds
+Accessibility, Input Monitoring and Microphone permission. So code from there runs only in an app built to allow it:
+one whose signed bundle holds the file named in OPT_IN. The downloadable build does not."""
 import hashlib
 import json
 from pathlib import Path
 import re
 import runpy
 
+OPT_IN = 'local_updates'  # written by SAYDOWN_LOCAL_UPDATES=1 ./install-app.sh --release
+
 
 def runtime_path(resources, data):
     fallback = resources / 'dictate_bundled.py'
     root = data / 'Runtime'
+    if not (resources / OPT_IN).is_file():
+        return fallback
     try:
         pointer = json.loads((root / 'current.json').read_text())
         version = pointer['version']

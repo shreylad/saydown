@@ -30,6 +30,10 @@ def update(app, stage, data):
             raise ValueError('This updater only supports the existing Saydown app.')
     subprocess.run(['codesign', '--verify', '--strict', str(app)], check=True)
     resources = app / 'Contents/Resources'
+    if not (resources / 'local_updates').is_file():
+        # without it the app ignores the runtime folder, so that nothing else can put code there either
+        raise ValueError('This app was not built to take local updates: rebuild it with '
+                         'SAYDOWN_LOCAL_UPDATES=1 ./install-app.sh --release.')
     if (resources / 'dictate.py').read_bytes() != (stage / 'runtime_bootstrap.py').read_bytes():
         # the bootstrap is inside the signed app, so replacing it means a new build and renewed permissions
         raise ValueError('runtime_bootstrap.py differs from the one inside the app: rebuild it with ./install-app.sh --release.')

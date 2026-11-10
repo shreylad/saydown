@@ -24,6 +24,7 @@ class RuntimeTests(unittest.TestCase):
         (self.resources / 'dictate.py').write_bytes(Path(boot.__file__).read_bytes())
         (self.resources / 'dictate_bundled.py').write_text('print("old")\n')
         (self.resources / 'ui.html').write_text('old UI')
+        (self.resources / boot.OPT_IN).write_text('')
         self.stage = self.root / 'stage'
         self.stage.mkdir()
         (self.stage / 'runtime_bootstrap.py').write_bytes(Path(boot.__file__).read_bytes())
@@ -46,6 +47,13 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(before, self.snapshot())
         self.assertFalse(any('--sign' in c.args[0] for c in run.call_args_list))
         self.assertEqual(boot.runtime_path(self.resources, self.data).read_text(), 'print("new")\n')
+
+    def test_an_app_not_built_for_local_updates_ignores_the_runtime_folder_and_refuses_updates(self):
+        self.install()
+        (self.resources / boot.OPT_IN).unlink()
+        self.assertEqual(boot.runtime_path(self.resources, self.data), self.resources / 'dictate_bundled.py')
+        with patch.object(updater.subprocess, 'run'), self.assertRaises(ValueError):
+            updater.update(self.app, self.stage, self.data)
 
     def test_changed_bootstrap_is_refused_before_changes(self):
         (self.stage / 'runtime_bootstrap.py').write_text('print("another bootstrap")\n')

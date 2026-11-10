@@ -30,6 +30,12 @@ class SpeechTests(unittest.TestCase):
     def tearDownClass(cls):
         cls.temp.cleanup()
 
+    def assert_one_text_pasted(self, board, text, kind):
+        """One clipboard write of the text, and beside it the markers that keep it out of clipboard managers."""
+        calls = [call.args for call in board.setString_forType_.call_args_list]
+        self.assertEqual([args for args in calls if args[1] not in self.a.TRANSIENT], [(text, kind)])
+        self.assertEqual([args for args in calls if args[1] in self.a.TRANSIENT], [("", m) for m in self.a.TRANSIENT])
+
     def setUp(self):
         self.a = self.app
         self.a.SETTINGS.write_text(json.dumps(self.a.DEFAULTS))
@@ -177,6 +183,25 @@ class SpeechTests(unittest.TestCase):
                                    ("We run Kubernetis here.", "We run Kubernetes here.")):
                 with self.subTest(text=text):
                     self.assertEqual(self.a.fuzzy(text), expected)
+
+    def test_fuzzy_leaves_real_words_near_a_term_as_said(self):
+        with patch.object(self.a, "term_list", return_value=["Notion", "Claude", "Docker", "Stripe", "React", "Linea", "Kubernetes"]):
+            said = "The nation added a clause to the docket, in strips, and reacts in a linear way."
+            self.assertEqual(self.a.fuzzy(said), said)
+            self.assertEqual(self.a.fuzzy("Kubernetis and Kuberneties."), "Kubernetes and Kubernetes.")
+
+    def test_recorded_reads_from_a_sample_offset_and_ignores_half_a_sample(self):
+        with tempfile.NamedTemporaryFile(suffix=".f32", delete=False) as f:
+            f.write(self.a.np.arange(10, dtype=self.a.np.float32).tobytes() + b"\x00\x00")
+        self.addCleanup(Path(f.name).unlink)
+        self.assertEqual(self.a.recorded(f.name).tolist(), list(range(10)))
+        self.assertEqual(self.a.recorded(f.name, 7).tolist(), [7, 8, 9])
+        self.assertEqual(len(self.a.recorded(f.name, 50)), 0)
+
+    def test_saving_settings_replaces_the_file_whole(self):
+        self.a.save_settings(self.a.DEFAULTS | {"language": "en"})
+        self.assertEqual(json.loads(self.a.SETTINGS.read_text())["language"], "en")
+        self.assertFalse(self.a.SETTINGS.with_suffix(".tmp").exists())
 
     def test_clear_self_corrections_are_resolved_without_the_model(self):
         for said, expected in (
@@ -839,7 +864,7 @@ class SpeechTests(unittest.TestCase):
         with patch.object(self.a, "AppKit", appkit), \
              patch.object(self.a, "press") as press, patch.object(self.a.threading, "Timer"):
             self.a.paste(text)
-        board.setString_forType_.assert_called_once_with("1. Review it\n2. Send it.", self.a.AppKit.NSPasteboardTypeString)
+        self.assert_one_text_pasted(board, "1. Review it\n2. Send it.", self.a.AppKit.NSPasteboardTypeString)
         press.assert_called_once_with(9, self.a.COMMAND)
 
     def test_user_unnumbered_agenda_becomes_four_bullets(self):
@@ -925,7 +950,7 @@ class SpeechTests(unittest.TestCase):
         with patch.object(self.a, "AppKit", appkit), patch.object(self.a, "press") as press, \
              patch.object(self.a.threading, "Timer"):
             self.a.paste(text)
-        board.setString_forType_.assert_called_once_with("My tasks:\n\n- Cooking at home\n- Working on the app.",
+        self.assert_one_text_pasted(board, "My tasks:\n\n- Cooking at home\n- Working on the app.",
                                                         appkit.NSPasteboardTypeString)
         press.assert_called_once_with(9, self.a.COMMAND)
 
@@ -1004,7 +1029,7 @@ class SpeechTests(unittest.TestCase):
         with patch.object(self.a, "AppKit", appkit), patch.object(self.a, "press") as press, \
              patch.object(self.a.threading, "Timer"):
             self.a.paste(text)
-        board.setString_forType_.assert_called_once_with(
+        self.assert_one_text_pasted(board, 
             "This is our agenda\n\n- I will cook\n- I will drive\n- I will clean.", appkit.NSPasteboardTypeString)
         press.assert_called_once_with(9, self.a.COMMAND)
 
