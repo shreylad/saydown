@@ -34,7 +34,7 @@ A personal dictation app for Apple Silicon Macs. By default, speech is transcrib
 For an Apple Silicon Mac running macOS 14 or later. Nothing else needs to be installed first. On Windows? See [Saydown for Windows](https://github.com/shreylad/saydown-windows).
 
 1. Download `Saydown.dmg` from the [latest release](https://github.com/shreylad/saydown/releases/latest), open it, and drag Saydown into Applications.
-2. Open Saydown. macOS will say it cannot verify the app, because it is not signed with an Apple developer account. Go to System Settings → Privacy & Security, scroll down, and click **Open Anyway**.
+2. Open Saydown. The app is signed and notarized by Apple, so it opens like any other downloaded app: click **Open** when macOS asks. (Replacing a build older than v0.3.4? In System Settings → Privacy & Security, remove the old Saydown rows under Accessibility and Input Monitoring with the − button before granting them again; the old rows belong to the previous signature and will not work.)
 3. Follow the **Setting up Saydown** card in the window. It has an Open Settings button for each permission (Accessibility and Input Monitoring) and restarts Saydown once both are on. macOS also asks for the Microphone; click Allow.
 4. Leave it open while it finishes setting itself up. It downloads the speech model (about 1.6 GB), showing progress on the same card, and you can dictate as soon as it is ready. The AI features (Rewrite, Ask, voice commands, fixing self-corrections) are optional: turn them on in Settings or on the setup card, and Saydown downloads their models (about 6 GB).
 
